@@ -1,0 +1,10 @@
+[package]
+name = "ormdb-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ormdb-proto.workspace = true
+async-nng.workspace = true
+tokio.workspace = true
+thiserror.workspace = true

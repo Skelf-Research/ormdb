@@ -1,0 +1,9 @@
+[package]
+name = "ormdb-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rkyv.workspace = true
+bytes.workspace = true
+thiserror.workspace = true

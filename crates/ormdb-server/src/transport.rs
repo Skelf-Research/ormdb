@@ -1,0 +1,326 @@
+//! Server transport layer using async-nng.
+//!
+//! Provides TCP and IPC transport for the ORMDB server using NNG's REP socket.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_nng::AsyncContext;
+use nng::options::Options;
+use nng::{Message, Protocol, Socket};
+
+use ormdb_proto::framing::encode_frame;
+use ormdb_proto::{Request, Response};
+
+use crate::config::ServerConfig;
+use crate::error::Error;
+use crate::handler::RequestHandler;
+
+/// Server transport that handles incoming connections.
+pub struct Transport {
+    socket: Socket,
+    handler: Arc<RequestHandler>,
+    max_message_size: usize,
+}
+
+impl Transport {
+    /// Create a new transport with the given configuration and request handler.
+    pub fn new(config: &ServerConfig, handler: Arc<RequestHandler>) -> Result<Self, Error> {
+        // Create REP socket
+        let socket = Socket::new(Protocol::Rep0)
+            .map_err(|e| Error::Transport(format!("failed to create socket: {}", e)))?;
+
+        // Set socket options
+        socket
+            .set_opt::<nng::options::RecvMaxSize>(config.max_message_size)
+            .map_err(|e| Error::Transport(format!("failed to set max message size: {}", e)))?;
+
+        // Bind to TCP address if configured
+        if let Some(tcp_addr) = &config.tcp_address {
+            socket
+                .listen(tcp_addr)
+                .map_err(|e| Error::Transport(format!("failed to listen on {}: {}", tcp_addr, e)))?;
+
+            tracing::info!(address = %tcp_addr, "listening on TCP");
+        }
+
+        // Bind to IPC address if configured
+        if let Some(ipc_addr) = &config.ipc_address {
+            socket
+                .listen(ipc_addr)
+                .map_err(|e| Error::Transport(format!("failed to listen on {}: {}", ipc_addr, e)))?;
+
+            tracing::info!(address = %ipc_addr, "listening on IPC");
+        }
+
+        Ok(Self {
+            socket,
+            handler,
+            max_message_size: config.max_message_size,
+        })
+    }
+
+    /// Run the transport loop, processing incoming requests.
+    pub async fn run(&self) -> Result<(), Error> {
+        // Create async context for the socket
+        let mut ctx = AsyncContext::try_from(&self.socket)
+            .map_err(|e| Error::Transport(format!("failed to create async context: {}", e)))?;
+
+        tracing::info!("transport ready, accepting requests");
+
+        loop {
+            // Receive a message
+            let msg = ctx
+                .receive(None)
+                .await
+                .map_err(|e| Error::Transport(format!("receive error: {}", e)))?;
+
+            // Process the message
+            let response_bytes = self.process_message(msg.as_slice());
+
+            // Send response
+            let response_msg = Message::from(response_bytes.as_slice());
+            ctx.send(response_msg, None)
+                .await
+                .map_err(|(_, e)| Error::Transport(format!("send error: {}", e)))?;
+        }
+    }
+
+    /// Run the transport with graceful shutdown support.
+    pub async fn run_until_shutdown(
+        &self,
+        mut shutdown: tokio::sync::broadcast::Receiver<()>,
+    ) -> Result<(), Error> {
+        let mut ctx = AsyncContext::try_from(&self.socket)
+            .map_err(|e| Error::Transport(format!("failed to create async context: {}", e)))?;
+
+        tracing::info!("transport ready, accepting requests");
+
+        loop {
+            tokio::select! {
+                _ = shutdown.recv() => {
+                    tracing::info!("shutdown signal received, stopping transport");
+                    return Ok(());
+                }
+                result = ctx.receive(Some(Duration::from_secs(1))) => {
+                    match result {
+                        Ok(msg) => {
+                            let response_bytes = self.process_message(msg.as_slice());
+                            let response_msg = Message::from(response_bytes.as_slice());
+
+                            if let Err((_, e)) = ctx.send(response_msg, None).await {
+                                tracing::error!(error = %e, "failed to send response");
+                            }
+                        }
+                        Err(nng::Error::TimedOut) => {
+                            // Timeout is normal, just continue to check for shutdown
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "receive error");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Process a raw message and return the response bytes.
+    fn process_message(&self, data: &[u8]) -> Vec<u8> {
+        // Decode and process the request
+        let response = match self.decode_and_handle(data) {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::error!(error = %e, "request processing error");
+                // Return error response with request ID 0 (unknown)
+                Response::error(0, ormdb_proto::error_codes::INTERNAL, e.to_string())
+            }
+        };
+
+        // Serialize response
+        match self.encode_response(&response) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to encode response");
+                // Try to send a minimal error response
+                self.encode_minimal_error(&e.to_string())
+            }
+        }
+    }
+
+    /// Decode a request and dispatch to handler.
+    fn decode_and_handle(&self, data: &[u8]) -> Result<Response, Error> {
+        // Check message size
+        if data.len() > self.max_message_size {
+            return Err(Error::Protocol(ormdb_proto::Error::InvalidMessage(format!(
+                "message too large: {} bytes (max: {})",
+                data.len(),
+                self.max_message_size
+            ))));
+        }
+
+        // Extract payload from framed message
+        let payload = ormdb_proto::framing::extract_payload(data)?;
+
+        // Deserialize request using rkyv
+        let archived = rkyv::access::<ormdb_proto::message::ArchivedRequest, rkyv::rancor::Error>(
+            payload,
+        )
+        .map_err(|e| {
+            Error::Protocol(ormdb_proto::Error::InvalidMessage(format!(
+                "failed to access request: {}",
+                e
+            )))
+        })?;
+
+        let request: Request =
+            rkyv::deserialize::<Request, rkyv::rancor::Error>(archived).map_err(|e| {
+                Error::Protocol(ormdb_proto::Error::InvalidMessage(format!(
+                    "failed to deserialize request: {}",
+                    e
+                )))
+            })?;
+
+        // Handle the request
+        Ok(self.handler.handle(&request))
+    }
+
+    /// Encode a response to framed bytes.
+    fn encode_response(&self, response: &Response) -> Result<Vec<u8>, Error> {
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(response).map_err(|e| {
+            Error::Protocol(ormdb_proto::Error::Serialization(format!(
+                "failed to serialize response: {}",
+                e
+            )))
+        })?;
+
+        encode_frame(&payload).map_err(|e| Error::Protocol(e))
+    }
+
+    /// Create a minimal error response when normal encoding fails.
+    fn encode_minimal_error(&self, message: &str) -> Vec<u8> {
+        let response = Response::error(0, ormdb_proto::error_codes::INTERNAL, message);
+
+        // Try to encode, fall back to empty on failure
+        match rkyv::to_bytes::<rkyv::rancor::Error>(&response) {
+            Ok(payload) => match encode_frame(&payload) {
+                Ok(framed) => framed,
+                Err(_) => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+/// Create a transport that listens on the configured addresses.
+pub fn create_transport(
+    config: &ServerConfig,
+    handler: Arc<RequestHandler>,
+) -> Result<Transport, Error> {
+    if !config.has_transport() {
+        return Err(Error::Config(
+            "no transport configured (need TCP or IPC address)".to_string(),
+        ));
+    }
+
+    Transport::new(config, handler)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::Database;
+    use ormdb_core::catalog::{EntityDef, FieldDef, FieldType, ScalarType, SchemaBundle};
+    use ormdb_proto::framing::MAX_MESSAGE_SIZE;
+
+    fn setup_test_components() -> (tempfile::TempDir, Arc<RequestHandler>) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+
+        // Create schema
+        let schema = SchemaBundle::new(1).with_entity(
+            EntityDef::new("User", "id")
+                .with_field(FieldDef::new("id", FieldType::Scalar(ScalarType::Uuid)))
+                .with_field(FieldDef::new("name", FieldType::Scalar(ScalarType::String))),
+        );
+        db.catalog().apply_schema(schema).unwrap();
+
+        let handler = Arc::new(RequestHandler::new(Arc::new(db)));
+        (dir, handler)
+    }
+
+    #[test]
+    fn test_transport_creation() {
+        let (_dir, handler) = setup_test_components();
+
+        // Use a unique port for testing
+        let config = ServerConfig::new("/tmp/test")
+            .with_tcp_address("tcp://127.0.0.1:19001")
+            .with_max_message_size(MAX_MESSAGE_SIZE);
+
+        let transport = Transport::new(&config, handler);
+        assert!(transport.is_ok());
+    }
+
+    #[test]
+    fn test_transport_requires_address() {
+        let (_dir, handler) = setup_test_components();
+
+        let config = ServerConfig::new("/tmp/test").without_tcp();
+
+        let result = create_transport(&config, handler);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_process_ping_message() {
+        let (_dir, handler) = setup_test_components();
+
+        let config = ServerConfig::new("/tmp/test")
+            .with_tcp_address("tcp://127.0.0.1:19002")
+            .with_max_message_size(MAX_MESSAGE_SIZE);
+
+        let transport = Transport::new(&config, handler).unwrap();
+
+        // Create a ping request
+        let request = Request::ping(42);
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&request).unwrap();
+        let framed = encode_frame(&payload).unwrap();
+
+        // Process it
+        let response_bytes = transport.process_message(&framed);
+
+        // Decode response
+        let response_payload = ormdb_proto::framing::extract_payload(&response_bytes).unwrap();
+        let archived = rkyv::access::<ormdb_proto::message::ArchivedResponse, rkyv::rancor::Error>(
+            response_payload,
+        )
+        .unwrap();
+        let response: Response =
+            rkyv::deserialize::<Response, rkyv::rancor::Error>(archived).unwrap();
+
+        assert_eq!(response.id, 42);
+        assert!(response.status.is_ok());
+        assert!(matches!(
+            response.payload,
+            ormdb_proto::ResponsePayload::Pong
+        ));
+    }
+
+    #[test]
+    fn test_process_invalid_message() {
+        let (_dir, handler) = setup_test_components();
+
+        let config = ServerConfig::new("/tmp/test")
+            .with_tcp_address("tcp://127.0.0.1:19003")
+            .with_max_message_size(MAX_MESSAGE_SIZE);
+
+        let transport = Transport::new(&config, handler).unwrap();
+
+        // Send garbage data
+        let response_bytes = transport.process_message(b"invalid data");
+
+        // Should return an error response
+        assert!(!response_bytes.is_empty());
+    }
+}

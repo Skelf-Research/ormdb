@@ -1,0 +1,19 @@
+[package]
+name = "ormdb-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sled.workspace = true
+rkyv.workspace = true
+mimalloc = { workspace = true, optional = true }
+thiserror.workspace = true
+tracing.workspace = true
+ormdb-proto.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
