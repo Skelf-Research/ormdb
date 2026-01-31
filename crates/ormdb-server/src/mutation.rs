@@ -1,7 +1,9 @@
 //! Mutation executor for handling write operations.
 
-use ormdb_core::query::encode_entity;
+use ormdb_core::query::{decode_entity, encode_entity};
+use ormdb_core::replication::ChangeLog;
 use ormdb_core::storage::{Record, StorageEngine, VersionedKey};
+use ormdb_proto::replication::ChangeLogEntry;
 use ormdb_proto::{FieldValue, Mutation, MutationBatch, MutationResult, Value};
 
 use crate::database::Database;
@@ -18,7 +20,7 @@ impl<'a> MutationExecutor<'a> {
         Self { database }
     }
 
-    /// Execute a single mutation.
+    /// Execute a single mutation (without CDC logging).
     pub fn execute(&self, mutation: &Mutation) -> Result<MutationResult, Error> {
         match mutation {
             Mutation::Insert { entity, data } => self.execute_insert(entity, data),
@@ -28,7 +30,30 @@ impl<'a> MutationExecutor<'a> {
         }
     }
 
-    /// Execute a batch of mutations atomically.
+    /// Execute a single mutation with CDC logging.
+    ///
+    /// This logs the mutation to the changelog after successful execution.
+    pub fn execute_with_cdc(&self, mutation: &Mutation) -> Result<MutationResult, Error> {
+        let changelog = self.database.changelog();
+        let schema_version = self.database.schema_version();
+
+        match mutation {
+            Mutation::Insert { entity, data } => {
+                self.execute_insert_with_cdc(entity, data, changelog, schema_version)
+            }
+            Mutation::Update { entity, id, data } => {
+                self.execute_update_with_cdc(entity, id, data, changelog, schema_version)
+            }
+            Mutation::Delete { entity, id } => {
+                self.execute_delete_with_cdc(entity, id, changelog, schema_version)
+            }
+            Mutation::Upsert { entity, id, data } => {
+                self.execute_upsert_with_cdc(entity, id.as_ref(), data, changelog, schema_version)
+            }
+        }
+    }
+
+    /// Execute a batch of mutations atomically (without CDC logging).
     pub fn execute_batch(&self, batch: &MutationBatch) -> Result<MutationResult, Error> {
         if batch.is_empty() {
             return Ok(MutationResult::affected(0));
@@ -53,8 +78,58 @@ impl<'a> MutationExecutor<'a> {
         }
     }
 
+    /// Execute a batch of mutations with CDC logging.
+    pub fn execute_batch_with_cdc(&self, batch: &MutationBatch) -> Result<MutationResult, Error> {
+        if batch.is_empty() {
+            return Ok(MutationResult::affected(0));
+        }
+
+        let mut inserted_ids = Vec::new();
+        let mut affected = 0u64;
+
+        for mutation in &batch.mutations {
+            let result = self.execute_with_cdc(mutation)?;
+            affected += result.affected;
+            inserted_ids.extend(result.inserted_ids);
+        }
+
+        if inserted_ids.is_empty() {
+            Ok(MutationResult::affected(affected))
+        } else {
+            Ok(MutationResult::bulk_inserted(inserted_ids))
+        }
+    }
+
     /// Execute an insert operation.
     fn execute_insert(&self, entity: &str, data: &[FieldValue]) -> Result<MutationResult, Error> {
+        let (id, _encoded) = self.do_insert(entity, data)?;
+        Ok(MutationResult::inserted(id))
+    }
+
+    /// Execute an insert operation with CDC logging.
+    fn execute_insert_with_cdc(
+        &self,
+        entity: &str,
+        data: &[FieldValue],
+        changelog: &ChangeLog,
+        schema_version: u64,
+    ) -> Result<MutationResult, Error> {
+        let (id, encoded) = self.do_insert(entity, data)?;
+
+        // Create changelog entry
+        let changed_fields: Vec<String> = data.iter().map(|fv| fv.field.clone()).collect();
+        let entry = ChangeLogEntry::insert(entity, id, encoded, changed_fields, schema_version);
+
+        // Log to changelog
+        changelog
+            .append(entry)
+            .map_err(|e| Error::Database(format!("failed to log to changelog: {}", e)))?;
+
+        Ok(MutationResult::inserted(id))
+    }
+
+    /// Internal insert implementation that returns both ID and encoded data.
+    fn do_insert(&self, entity: &str, data: &[FieldValue]) -> Result<([u8; 16], Vec<u8>), Error> {
         // Generate a new entity ID
         let id = StorageEngine::generate_id();
 
@@ -77,10 +152,10 @@ impl<'a> MutationExecutor<'a> {
         let key = VersionedKey::now(id);
         self.database
             .storage()
-            .put_typed(entity, key, Record::new(encoded))
+            .put_typed(entity, key, Record::new(encoded.clone()))
             .map_err(|e| Error::Storage(e))?;
 
-        Ok(MutationResult::inserted(id))
+        Ok((id, encoded))
     }
 
     /// Execute an update operation.
@@ -90,6 +165,46 @@ impl<'a> MutationExecutor<'a> {
         id: &[u8; 16],
         data: &[FieldValue],
     ) -> Result<MutationResult, Error> {
+        let _ = self.do_update(entity, id, data)?;
+        Ok(MutationResult::affected(1))
+    }
+
+    /// Execute an update operation with CDC logging.
+    fn execute_update_with_cdc(
+        &self,
+        entity: &str,
+        id: &[u8; 16],
+        data: &[FieldValue],
+        changelog: &ChangeLog,
+        schema_version: u64,
+    ) -> Result<MutationResult, Error> {
+        let (before_data, after_data, changed_fields) = self.do_update(entity, id, data)?;
+
+        // Create changelog entry
+        let entry = ChangeLogEntry::update(
+            entity,
+            *id,
+            before_data,
+            after_data,
+            changed_fields,
+            schema_version,
+        );
+
+        // Log to changelog
+        changelog
+            .append(entry)
+            .map_err(|e| Error::Database(format!("failed to log to changelog: {}", e)))?;
+
+        Ok(MutationResult::affected(1))
+    }
+
+    /// Internal update implementation that returns before/after data and changed fields.
+    fn do_update(
+        &self,
+        entity: &str,
+        id: &[u8; 16],
+        data: &[FieldValue],
+    ) -> Result<(Vec<u8>, Vec<u8>, Vec<String>), Error> {
         // Get existing entity data
         let (_version, existing) = self
             .database
@@ -100,12 +215,17 @@ impl<'a> MutationExecutor<'a> {
                 Error::Database(format!("entity {}:{} not found", entity, hex_id(id)))
             })?;
 
+        let before_data = existing.data.clone();
+
         // Decode existing fields
-        let mut fields: Vec<(String, Value)> =
-            ormdb_core::query::decode_entity(&existing.data)
+        let before_fields: Vec<(String, Value)> =
+            decode_entity(&existing.data)
                 .map_err(|e| Error::Database(format!("failed to decode entity: {}", e)))?;
 
+        let mut fields = before_fields.clone();
+
         // Merge updates (replace existing fields, add new ones)
+        let mut changed_fields = Vec::new();
         for fv in data {
             // Don't allow updating the ID field
             if fv.field == "id" {
@@ -113,8 +233,12 @@ impl<'a> MutationExecutor<'a> {
             }
 
             if let Some(pos) = fields.iter().position(|(name, _)| name == &fv.field) {
+                if fields[pos].1 != fv.value {
+                    changed_fields.push(fv.field.clone());
+                }
                 fields[pos].1 = fv.value.clone();
             } else {
+                changed_fields.push(fv.field.clone());
                 fields.push((fv.field.clone(), fv.value.clone()));
             }
         }
@@ -126,25 +250,62 @@ impl<'a> MutationExecutor<'a> {
         let key = VersionedKey::now(*id);
         self.database
             .storage()
-            .put_typed(entity, key, Record::new(encoded))
+            .put_typed(entity, key, Record::new(encoded.clone()))
             .map_err(|e| Error::Storage(e))?;
 
-        Ok(MutationResult::affected(1))
+        Ok((before_data, encoded, changed_fields))
     }
 
     /// Execute a delete operation.
     fn execute_delete(&self, entity: &str, id: &[u8; 16]) -> Result<MutationResult, Error> {
-        // Check if entity exists
-        let exists = self
+        let before_data = self.do_delete(entity, id)?;
+        if before_data.is_some() {
+            Ok(MutationResult::affected(1))
+        } else {
+            Ok(MutationResult::affected(0))
+        }
+    }
+
+    /// Execute a delete operation with CDC logging.
+    fn execute_delete_with_cdc(
+        &self,
+        entity: &str,
+        id: &[u8; 16],
+        changelog: &ChangeLog,
+        schema_version: u64,
+    ) -> Result<MutationResult, Error> {
+        let before_data = self.do_delete(entity, id)?;
+
+        if let Some(data) = before_data {
+            // Create changelog entry
+            let entry = ChangeLogEntry::delete(entity, *id, data, schema_version);
+
+            // Log to changelog
+            changelog
+                .append(entry)
+                .map_err(|e| Error::Database(format!("failed to log to changelog: {}", e)))?;
+
+            Ok(MutationResult::affected(1))
+        } else {
+            Ok(MutationResult::affected(0))
+        }
+    }
+
+    /// Internal delete implementation that returns the before data if entity existed.
+    fn do_delete(&self, entity: &str, id: &[u8; 16]) -> Result<Option<Vec<u8>>, Error> {
+        // Check if entity exists and get its data
+        let existing = self
             .database
             .storage()
             .get_latest(id)
-            .map_err(|e| Error::Storage(e))?
-            .is_some();
+            .map_err(|e| Error::Storage(e))?;
 
-        if !exists {
-            return Ok(MutationResult::affected(0));
+        if existing.is_none() {
+            return Ok(None);
         }
+
+        let (_version, record) = existing.unwrap();
+        let before_data = record.data.clone();
 
         // Soft delete (creates tombstone)
         self.database
@@ -152,7 +313,7 @@ impl<'a> MutationExecutor<'a> {
             .delete_typed(entity, id)
             .map_err(|e| Error::Storage(e))?;
 
-        Ok(MutationResult::affected(1))
+        Ok(Some(before_data))
     }
 
     /// Execute an upsert operation.
@@ -187,6 +348,40 @@ impl<'a> MutationExecutor<'a> {
         }
     }
 
+    /// Execute an upsert operation with CDC logging.
+    fn execute_upsert_with_cdc(
+        &self,
+        entity: &str,
+        id: Option<&[u8; 16]>,
+        data: &[FieldValue],
+        changelog: &ChangeLog,
+        schema_version: u64,
+    ) -> Result<MutationResult, Error> {
+        match id {
+            Some(existing_id) => {
+                // Check if entity exists
+                let exists = self
+                    .database
+                    .storage()
+                    .get_latest(existing_id)
+                    .map_err(|e| Error::Storage(e))?
+                    .is_some();
+
+                if exists {
+                    // Update existing with CDC
+                    self.execute_update_with_cdc(entity, existing_id, data, changelog, schema_version)
+                } else {
+                    // Insert with provided ID and CDC
+                    self.execute_insert_with_id_cdc(entity, *existing_id, data, changelog, schema_version)
+                }
+            }
+            None => {
+                // No ID provided, always insert with CDC
+                self.execute_insert_with_cdc(entity, data, changelog, schema_version)
+            }
+        }
+    }
+
     /// Execute an insert with a specific ID.
     fn execute_insert_with_id(
         &self,
@@ -194,6 +389,40 @@ impl<'a> MutationExecutor<'a> {
         id: [u8; 16],
         data: &[FieldValue],
     ) -> Result<MutationResult, Error> {
+        let _ = self.do_insert_with_id(entity, id, data)?;
+        Ok(MutationResult::inserted(id))
+    }
+
+    /// Execute an insert with a specific ID and CDC logging.
+    fn execute_insert_with_id_cdc(
+        &self,
+        entity: &str,
+        id: [u8; 16],
+        data: &[FieldValue],
+        changelog: &ChangeLog,
+        schema_version: u64,
+    ) -> Result<MutationResult, Error> {
+        let encoded = self.do_insert_with_id(entity, id, data)?;
+
+        // Create changelog entry
+        let changed_fields: Vec<String> = data.iter().map(|fv| fv.field.clone()).collect();
+        let entry = ChangeLogEntry::insert(entity, id, encoded, changed_fields, schema_version);
+
+        // Log to changelog
+        changelog
+            .append(entry)
+            .map_err(|e| Error::Database(format!("failed to log to changelog: {}", e)))?;
+
+        Ok(MutationResult::inserted(id))
+    }
+
+    /// Internal insert with ID implementation.
+    fn do_insert_with_id(
+        &self,
+        entity: &str,
+        id: [u8; 16],
+        data: &[FieldValue],
+    ) -> Result<Vec<u8>, Error> {
         // Build field data including the ID
         let mut fields: Vec<(String, Value)> = Vec::with_capacity(data.len() + 1);
         fields.push(("id".to_string(), Value::Uuid(id)));
@@ -212,10 +441,10 @@ impl<'a> MutationExecutor<'a> {
         let key = VersionedKey::now(id);
         self.database
             .storage()
-            .put_typed(entity, key, Record::new(encoded))
+            .put_typed(entity, key, Record::new(encoded.clone()))
             .map_err(|e| Error::Storage(e))?;
 
-        Ok(MutationResult::inserted(id))
+        Ok(encoded)
     }
 }
 

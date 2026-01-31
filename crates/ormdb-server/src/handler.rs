@@ -2,7 +2,15 @@
 
 use std::sync::Arc;
 
-use ormdb_proto::{error_codes, Operation, Request, Response};
+use tracing::{debug, instrument};
+
+use ormdb_core::metrics::SharedMetricsRegistry;
+use ormdb_core::query::{AggregateExecutor, ExplainService};
+use ormdb_proto::{
+    error_codes, AggregateQuery, CacheMetrics, EntityCount, EntityQueryCount, MetricsResult,
+    MutationMetrics, Operation, QueryMetrics, ReplicationRole, ReplicationStatus, Request,
+    Response, StorageMetrics, StreamChangesRequest, StreamChangesResponse, TransportMetrics,
+};
 
 use crate::database::Database;
 use crate::error::Error;
@@ -11,22 +19,39 @@ use crate::mutation::MutationExecutor;
 /// Handles incoming requests and dispatches to appropriate handlers.
 pub struct RequestHandler {
     database: Arc<Database>,
+    metrics: Option<SharedMetricsRegistry>,
 }
 
 impl RequestHandler {
     /// Create a new request handler with the given database.
     pub fn new(database: Arc<Database>) -> Self {
-        Self { database }
+        Self {
+            database,
+            metrics: None,
+        }
+    }
+
+    /// Create a new request handler with metrics support.
+    pub fn with_metrics(database: Arc<Database>, metrics: SharedMetricsRegistry) -> Self {
+        Self {
+            database,
+            metrics: Some(metrics),
+        }
     }
 
     /// Handle a request and return a response.
+    #[instrument(skip(self, request), fields(request_id = request.id, op = ?std::mem::discriminant(&request.operation)))]
     pub fn handle(&self, request: &Request) -> Response {
+        let start = std::time::Instant::now();
         let result = self.handle_inner(request);
 
-        match result {
+        let response = match result {
             Ok(response) => response,
             Err(e) => self.error_response(request.id, e),
-        }
+        };
+
+        debug!(duration_us = start.elapsed().as_micros() as u64, success = response.status.is_ok(), "request handled");
+        response
     }
 
     /// Internal handler that can return errors.
@@ -55,10 +80,24 @@ impl RequestHandler {
             Operation::MutateBatch(batch) => self.handle_batch(request.id, batch),
             Operation::GetSchema => self.handle_get_schema(request.id),
             Operation::Ping => Ok(Response::pong(request.id)),
+            Operation::Explain(query) => self.handle_explain(request.id, query),
+            Operation::GetMetrics => self.handle_get_metrics(request.id),
+            Operation::Aggregate(query) => self.handle_aggregate(request.id, query),
+            Operation::Subscribe(_) | Operation::Unsubscribe { .. } => {
+                // Pub-sub operations require async handler integration (Phase 6)
+                Ok(Response::error(
+                    request.id,
+                    error_codes::INVALID_REQUEST,
+                    "pub-sub operations not yet available on this handler",
+                ))
+            }
+            Operation::StreamChanges(req) => self.handle_stream_changes(request.id, req),
+            Operation::GetReplicationStatus => self.handle_replication_status(request.id),
         }
     }
 
     /// Handle a query operation.
+    #[instrument(skip(self, query), fields(entity = %query.root_entity))]
     fn handle_query(
         &self,
         request_id: u64,
@@ -69,10 +108,31 @@ impl RequestHandler {
             .execute(query)
             .map_err(|e| Error::Database(format!("query execution failed: {}", e)))?;
 
+        debug!(entities_returned = result.entities.get(0).map(|e| e.len()).unwrap_or(0), "query completed");
         Ok(Response::query_ok(request_id, result))
     }
 
+    /// Handle an aggregate query operation.
+    #[instrument(skip(self, query), fields(entity = %query.root_entity))]
+    fn handle_aggregate(
+        &self,
+        request_id: u64,
+        query: &AggregateQuery,
+    ) -> Result<Response, Error> {
+        let executor = AggregateExecutor::new(
+            self.database.storage(),
+            self.database.columnar(),
+        );
+        let result = executor
+            .execute(query)
+            .map_err(|e| Error::Database(format!("aggregate query failed: {}", e)))?;
+
+        debug!(entity = %query.root_entity, aggregations = query.aggregations.len(), "aggregate query completed");
+        Ok(Response::aggregate_ok(request_id, result))
+    }
+
     /// Handle a single mutation operation.
+    #[instrument(skip(self, mutation), fields(entity = %mutation.entity(), mutation_type = ?std::mem::discriminant(mutation)))]
     fn handle_mutate(
         &self,
         request_id: u64,
@@ -81,6 +141,7 @@ impl RequestHandler {
         let executor = MutationExecutor::new(&self.database);
         let result = executor.execute(mutation)?;
 
+        debug!(affected = result.affected, "mutation completed");
         Ok(Response::mutation_ok(request_id, result))
     }
 
@@ -120,6 +181,139 @@ impl RequestHandler {
         };
 
         Ok(Response::schema_ok(request_id, version, data))
+    }
+
+    /// Handle an explain request.
+    fn handle_explain(
+        &self,
+        request_id: u64,
+        query: &ormdb_proto::GraphQuery,
+    ) -> Result<Response, Error> {
+        let catalog = self.database.catalog();
+        let statistics = self.database.statistics();
+        let cache = self.database.plan_cache();
+
+        let service = ExplainService::new(catalog)
+            .with_statistics(statistics)
+            .with_cache(cache);
+
+        let result = service
+            .explain(query)
+            .map_err(|e| Error::Database(format!("explain failed: {}", e)))?;
+
+        Ok(Response::explain_ok(request_id, result))
+    }
+
+    /// Handle a get metrics request.
+    fn handle_get_metrics(&self, request_id: u64) -> Result<Response, Error> {
+        let result = self.collect_metrics();
+        Ok(Response::metrics_ok(request_id, result))
+    }
+
+    /// Collect current server metrics.
+    fn collect_metrics(&self) -> MetricsResult {
+        // Get metrics from registry if available
+        let (uptime_secs, query_metrics, mutations, cache) = if let Some(ref registry) = self.metrics {
+            let queries_by_entity: Vec<EntityQueryCount> = registry
+                .queries_by_entity()
+                .into_iter()
+                .map(|(entity, count)| EntityQueryCount { entity, count })
+                .collect();
+
+            (
+                registry.uptime_secs(),
+                QueryMetrics {
+                    total_count: registry.query_count(),
+                    avg_duration_us: registry.avg_query_latency_us(),
+                    p50_duration_us: registry.p50_query_latency_us(),
+                    p99_duration_us: registry.p99_query_latency_us(),
+                    max_duration_us: registry.max_query_latency_us(),
+                    by_entity: queries_by_entity,
+                },
+                MutationMetrics {
+                    total_count: registry.mutation_count(),
+                    inserts: registry.insert_count(),
+                    updates: registry.update_count(),
+                    deletes: registry.delete_count(),
+                    upserts: registry.upsert_count(),
+                    rows_affected: registry.rows_affected(),
+                },
+                CacheMetrics {
+                    hits: registry.cache_hits(),
+                    misses: registry.cache_misses(),
+                    hit_rate: registry.cache_hit_rate(),
+                    size: self.database.plan_cache().len() as u64,
+                    capacity: 1000, // Default capacity
+                    evictions: registry.cache_evictions(),
+                },
+            )
+        } else {
+            // No metrics registry, return defaults
+            (
+                0,
+                QueryMetrics::default(),
+                MutationMetrics::default(),
+                CacheMetrics::default(),
+            )
+        };
+
+        // Get storage metrics from statistics
+        let statistics = self.database.statistics();
+        let entity_counts: Vec<EntityCount> = statistics
+            .snapshot()
+            .into_iter()
+            .map(|(entity, count)| EntityCount { entity, count })
+            .collect();
+
+        let total_entities: u64 = entity_counts.iter().map(|e| e.count).sum();
+
+        MetricsResult::new(
+            uptime_secs,
+            query_metrics,
+            mutations,
+            cache,
+            StorageMetrics {
+                entity_counts,
+                total_entities,
+                size_bytes: None,
+                active_transactions: 0,
+            },
+            TransportMetrics::default(),
+        )
+    }
+
+    /// Handle a stream changes request (CDC/replication).
+    fn handle_stream_changes(
+        &self,
+        request_id: u64,
+        req: &StreamChangesRequest,
+    ) -> Result<Response, Error> {
+        let changelog = self.database.changelog();
+
+        // Scan entries from the changelog
+        let (entries, has_more) = if let Some(ref filter) = req.entity_filter {
+            changelog.scan_filtered(req.from_lsn, req.batch_size as usize, Some(filter))
+        } else {
+            changelog.scan_batch(req.from_lsn, req.batch_size as usize)
+        }
+        .map_err(|e| Error::Database(format!("failed to scan changelog: {}", e)))?;
+
+        // Calculate next LSN
+        let next_lsn = entries.last().map(|e| e.lsn + 1).unwrap_or(req.from_lsn);
+
+        let response = StreamChangesResponse::new(entries, next_lsn, has_more);
+        Ok(Response::stream_changes_ok(request_id, response))
+    }
+
+    /// Handle a get replication status request.
+    fn handle_replication_status(&self, request_id: u64) -> Result<Response, Error> {
+        let changelog = self.database.changelog();
+        let current_lsn = changelog.current_lsn();
+
+        // For now, all servers are standalone (full replication manager comes later)
+        let status = ReplicationStatus::new(ReplicationRole::Standalone, current_lsn);
+
+        Ok(Response::replication_status_ok(request_id, status))
     }
 
     /// Convert an error to an error response.

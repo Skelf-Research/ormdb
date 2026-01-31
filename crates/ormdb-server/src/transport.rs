@@ -2,8 +2,9 @@
 //!
 //! Provides TCP and IPC transport for the ORMDB server using NNG's REP socket.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_nng::AsyncContext;
 use nng::options::Options;
@@ -16,11 +17,95 @@ use crate::config::ServerConfig;
 use crate::error::Error;
 use crate::handler::RequestHandler;
 
+/// Transport metrics for monitoring.
+#[derive(Debug)]
+pub struct TransportMetrics {
+    /// Total number of requests received.
+    pub requests_total: AtomicU64,
+    /// Number of successful requests.
+    pub requests_success: AtomicU64,
+    /// Number of failed requests.
+    pub requests_failed: AtomicU64,
+    /// Number of bytes received.
+    pub bytes_received: AtomicU64,
+    /// Number of bytes sent.
+    pub bytes_sent: AtomicU64,
+    /// Server start time.
+    pub started_at: Instant,
+}
+
+impl TransportMetrics {
+    /// Create new metrics.
+    fn new() -> Self {
+        Self {
+            requests_total: AtomicU64::new(0),
+            requests_success: AtomicU64::new(0),
+            requests_failed: AtomicU64::new(0),
+            bytes_received: AtomicU64::new(0),
+            bytes_sent: AtomicU64::new(0),
+            started_at: Instant::now(),
+        }
+    }
+
+    /// Record a successful request.
+    fn record_success(&self, received_bytes: usize, sent_bytes: usize) {
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
+        self.requests_success.fetch_add(1, Ordering::Relaxed);
+        self.bytes_received.fetch_add(received_bytes as u64, Ordering::Relaxed);
+        self.bytes_sent.fetch_add(sent_bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Record a failed request.
+    fn record_failure(&self, received_bytes: usize, sent_bytes: usize) {
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
+        self.requests_failed.fetch_add(1, Ordering::Relaxed);
+        self.bytes_received.fetch_add(received_bytes as u64, Ordering::Relaxed);
+        self.bytes_sent.fetch_add(sent_bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Get the uptime duration.
+    pub fn uptime(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+
+    /// Get total requests count.
+    pub fn total_requests(&self) -> u64 {
+        self.requests_total.load(Ordering::Relaxed)
+    }
+
+    /// Get successful requests count.
+    pub fn successful_requests(&self) -> u64 {
+        self.requests_success.load(Ordering::Relaxed)
+    }
+
+    /// Get failed requests count.
+    pub fn failed_requests(&self) -> u64 {
+        self.requests_failed.load(Ordering::Relaxed)
+    }
+
+    /// Get total bytes received.
+    pub fn total_bytes_received(&self) -> u64 {
+        self.bytes_received.load(Ordering::Relaxed)
+    }
+
+    /// Get total bytes sent.
+    pub fn total_bytes_sent(&self) -> u64 {
+        self.bytes_sent.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for TransportMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Server transport that handles incoming connections.
 pub struct Transport {
     socket: Socket,
     handler: Arc<RequestHandler>,
     max_message_size: usize,
+    metrics: Arc<TransportMetrics>,
 }
 
 impl Transport {
@@ -57,7 +142,13 @@ impl Transport {
             socket,
             handler,
             max_message_size: config.max_message_size,
+            metrics: Arc::new(TransportMetrics::new()),
         })
+    }
+
+    /// Get a reference to the transport metrics.
+    pub fn metrics(&self) -> &TransportMetrics {
+        &self.metrics
     }
 
     /// Run the transport loop, processing incoming requests.
@@ -99,17 +190,33 @@ impl Transport {
         loop {
             tokio::select! {
                 _ = shutdown.recv() => {
-                    tracing::info!("shutdown signal received, stopping transport");
+                    tracing::info!(
+                        total_requests = self.metrics.total_requests(),
+                        successful = self.metrics.successful_requests(),
+                        failed = self.metrics.failed_requests(),
+                        bytes_received = self.metrics.total_bytes_received(),
+                        bytes_sent = self.metrics.total_bytes_sent(),
+                        uptime_secs = self.metrics.uptime().as_secs(),
+                        "shutdown signal received, stopping transport"
+                    );
                     return Ok(());
                 }
                 result = ctx.receive(Some(Duration::from_secs(1))) => {
                     match result {
                         Ok(msg) => {
-                            let response_bytes = self.process_message(msg.as_slice());
+                            let received_bytes = msg.len();
+                            let (response_bytes, is_success) = self.process_message_with_status(msg.as_slice());
+                            let sent_bytes = response_bytes.len();
+
                             let response_msg = Message::from(response_bytes.as_slice());
 
                             if let Err((_, e)) = ctx.send(response_msg, None).await {
                                 tracing::error!(error = %e, "failed to send response");
+                                self.metrics.record_failure(received_bytes, 0);
+                            } else if is_success {
+                                self.metrics.record_success(received_bytes, sent_bytes);
+                            } else {
+                                self.metrics.record_failure(received_bytes, sent_bytes);
                             }
                         }
                         Err(nng::Error::TimedOut) => {
@@ -127,25 +234,36 @@ impl Transport {
 
     /// Process a raw message and return the response bytes.
     fn process_message(&self, data: &[u8]) -> Vec<u8> {
+        self.process_message_with_status(data).0
+    }
+
+    /// Process a raw message and return (response bytes, is_success).
+    fn process_message_with_status(&self, data: &[u8]) -> (Vec<u8>, bool) {
         // Decode and process the request
-        let response = match self.decode_and_handle(data) {
-            Ok(response) => response,
+        let (response, is_success) = match self.decode_and_handle(data) {
+            Ok(response) => {
+                let is_ok = response.status.is_ok();
+                (response, is_ok)
+            }
             Err(e) => {
                 tracing::error!(error = %e, "request processing error");
                 // Return error response with request ID 0 (unknown)
-                Response::error(0, ormdb_proto::error_codes::INTERNAL, e.to_string())
+                let response = Response::error(0, ormdb_proto::error_codes::INTERNAL, e.to_string());
+                (response, false)
             }
         };
 
         // Serialize response
-        match self.encode_response(&response) {
+        let bytes = match self.encode_response(&response) {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::error!(error = %e, "failed to encode response");
                 // Try to send a minimal error response
                 self.encode_minimal_error(&e.to_string())
             }
-        }
+        };
+
+        (bytes, is_success)
     }
 
     /// Decode a request and dispatch to handler.
@@ -162,19 +280,13 @@ impl Transport {
         // Extract payload from framed message
         let payload = ormdb_proto::framing::extract_payload(data)?;
 
-        // Deserialize request using rkyv
-        let archived = rkyv::access::<ormdb_proto::message::ArchivedRequest, rkyv::rancor::Error>(
-            payload,
-        )
-        .map_err(|e| {
-            Error::Protocol(ormdb_proto::Error::InvalidMessage(format!(
-                "failed to access request: {}",
-                e
-            )))
-        })?;
+        // Copy to aligned buffer for rkyv (required for zero-copy access)
+        let mut aligned: rkyv::util::AlignedVec<16> = rkyv::util::AlignedVec::new();
+        aligned.extend_from_slice(payload);
 
+        // Deserialize request using rkyv
         let request: Request =
-            rkyv::deserialize::<Request, rkyv::rancor::Error>(archived).map_err(|e| {
+            rkyv::from_bytes::<Request, rkyv::rancor::Error>(&aligned).map_err(|e| {
                 Error::Protocol(ormdb_proto::Error::InvalidMessage(format!(
                     "failed to deserialize request: {}",
                     e
@@ -290,14 +402,12 @@ mod tests {
         // Process it
         let response_bytes = transport.process_message(&framed);
 
-        // Decode response
+        // Decode response - copy to aligned buffer for rkyv
         let response_payload = ormdb_proto::framing::extract_payload(&response_bytes).unwrap();
-        let archived = rkyv::access::<ormdb_proto::message::ArchivedResponse, rkyv::rancor::Error>(
-            response_payload,
-        )
-        .unwrap();
+        let mut aligned: rkyv::util::AlignedVec<16> = rkyv::util::AlignedVec::new();
+        aligned.extend_from_slice(response_payload);
         let response: Response =
-            rkyv::deserialize::<Response, rkyv::rancor::Error>(archived).unwrap();
+            rkyv::from_bytes::<Response, rkyv::rancor::Error>(&aligned).unwrap();
 
         assert_eq!(response.id, 42);
         assert!(response.status.is_ok());

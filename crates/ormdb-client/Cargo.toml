@@ -6,5 +6,7 @@ edition.workspace = true
 [dependencies]
 ormdb-proto.workspace = true
 async-nng.workspace = true
+nng.workspace = true
+rkyv.workspace = true
 tokio.workspace = true
 thiserror.workspace = true

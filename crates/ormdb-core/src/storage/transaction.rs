@@ -1,5 +1,7 @@
 //! Transaction support for atomic multi-key operations.
 
+use std::collections::{HashMap, HashSet};
+
 use super::{Record, StorageEngine, VersionedKey};
 use crate::error::Error;
 use sled::transaction::{ConflictableTransactionError, TransactionalTree};
@@ -9,20 +11,50 @@ use sled::Transactional;
 const LATEST_PREFIX: &[u8] = b"latest:";
 
 /// A pending operation in a transaction.
-#[derive(Debug)]
-enum TransactionOp {
+#[derive(Debug, Clone)]
+pub enum TransactionOp {
     /// Put a versioned record.
-    Put { key: VersionedKey, record: Record },
+    Put {
+        /// Entity type name.
+        entity_type: String,
+        /// Versioned key.
+        key: VersionedKey,
+        /// Record data.
+        record: Record,
+    },
     /// Delete (soft delete via tombstone).
-    Delete { entity_id: [u8; 16] },
+    Delete {
+        /// Entity type name.
+        entity_type: String,
+        /// Entity ID to delete.
+        entity_id: [u8; 16],
+    },
+    /// Update a record (writes new version).
+    Update {
+        /// Entity type name.
+        entity_type: String,
+        /// Entity ID to update.
+        entity_id: [u8; 16],
+        /// New record data.
+        record: Record,
+    },
 }
 
 /// A transaction for atomic multi-key operations.
 ///
 /// Operations are collected and executed atomically on commit.
+/// Supports read tracking for optimistic concurrency control.
 pub struct Transaction<'a> {
     engine: &'a StorageEngine,
     ops: Vec<TransactionOp>,
+    /// Entities read during this transaction with their versions.
+    read_set: HashMap<[u8; 16], u64>,
+    /// Entities being written in this transaction.
+    write_set: HashSet<[u8; 16]>,
+    /// Expected versions for optimistic locking.
+    expected_versions: HashMap<[u8; 16], u64>,
+    /// Local cache for uncommitted writes (entity_id -> record).
+    write_cache: HashMap<[u8; 16], Option<Record>>,
 }
 
 impl<'a> Transaction<'a> {
@@ -31,42 +63,223 @@ impl<'a> Transaction<'a> {
         Self {
             engine,
             ops: Vec::new(),
+            read_set: HashMap::new(),
+            write_set: HashSet::new(),
+            expected_versions: HashMap::new(),
+            write_cache: HashMap::new(),
         }
     }
 
-    /// Queue a put operation.
+    /// Queue a put operation (legacy, without entity type).
     pub fn put(&mut self, key: VersionedKey, record: Record) -> &mut Self {
-        self.ops.push(TransactionOp::Put { key, record });
+        self.write_set.insert(key.entity_id);
+        self.write_cache.insert(key.entity_id, Some(record.clone()));
+        self.ops.push(TransactionOp::Put {
+            entity_type: String::new(),
+            key,
+            record,
+        });
+        self
+    }
+
+    /// Queue a typed put operation.
+    pub fn put_typed(
+        &mut self,
+        entity_type: impl Into<String>,
+        key: VersionedKey,
+        record: Record,
+    ) -> &mut Self {
+        self.write_set.insert(key.entity_id);
+        self.write_cache.insert(key.entity_id, Some(record.clone()));
+        self.ops.push(TransactionOp::Put {
+            entity_type: entity_type.into(),
+            key,
+            record,
+        });
+        self
+    }
+
+    /// Queue an insert operation (creates new entity).
+    pub fn insert(
+        &mut self,
+        entity_type: impl Into<String>,
+        entity_id: [u8; 16],
+        record: Record,
+    ) -> &mut Self {
+        let key = VersionedKey::now(entity_id);
+        self.put_typed(entity_type, key, record)
+    }
+
+    /// Queue an update operation.
+    pub fn update(
+        &mut self,
+        entity_type: impl Into<String>,
+        entity_id: [u8; 16],
+        record: Record,
+    ) -> &mut Self {
+        self.write_set.insert(entity_id);
+        self.write_cache.insert(entity_id, Some(record.clone()));
+        self.ops.push(TransactionOp::Update {
+            entity_type: entity_type.into(),
+            entity_id,
+            record,
+        });
         self
     }
 
     /// Queue a delete operation (soft delete via tombstone).
     pub fn delete(&mut self, entity_id: [u8; 16]) -> &mut Self {
-        self.ops.push(TransactionOp::Delete { entity_id });
+        self.write_set.insert(entity_id);
+        self.write_cache.insert(entity_id, None);
+        self.ops.push(TransactionOp::Delete {
+            entity_type: String::new(),
+            entity_id,
+        });
         self
+    }
+
+    /// Queue a typed delete operation.
+    pub fn delete_typed(
+        &mut self,
+        entity_type: impl Into<String>,
+        entity_id: [u8; 16],
+    ) -> &mut Self {
+        self.write_set.insert(entity_id);
+        self.write_cache.insert(entity_id, None);
+        self.ops.push(TransactionOp::Delete {
+            entity_type: entity_type.into(),
+            entity_id,
+        });
+        self
+    }
+
+    /// Read an entity within the transaction.
+    ///
+    /// This returns uncommitted writes from this transaction if present,
+    /// otherwise reads from the storage engine and tracks the version
+    /// for conflict detection.
+    pub fn read(&mut self, entity_id: &[u8; 16]) -> Result<Option<Record>, Error> {
+        // Check write cache first (uncommitted writes in this tx)
+        if let Some(cached) = self.write_cache.get(entity_id) {
+            return Ok(cached.clone());
+        }
+
+        // Read from storage and track version
+        match self.engine.get_latest(entity_id)? {
+            Some((version, record)) => {
+                self.read_set.insert(*entity_id, version);
+                Ok(Some(record))
+            }
+            None => {
+                // Track that we read "nothing" at version 0
+                self.read_set.insert(*entity_id, 0);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Check if an entity exists (for foreign key validation).
+    ///
+    /// This is a read operation that tracks versions.
+    pub fn exists(&mut self, entity_id: &[u8; 16]) -> Result<bool, Error> {
+        // Check write cache first
+        if let Some(cached) = self.write_cache.get(entity_id) {
+            return Ok(cached.is_some());
+        }
+
+        // Check storage
+        match self.engine.get_latest(entity_id)? {
+            Some((version, _)) => {
+                self.read_set.insert(*entity_id, version);
+                Ok(true)
+            }
+            None => {
+                self.read_set.insert(*entity_id, 0);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Set expected version for optimistic locking.
+    ///
+    /// If the entity's version doesn't match at commit time, the transaction fails.
+    pub fn expect_version(&mut self, entity_id: [u8; 16], version: u64) -> &mut Self {
+        self.expected_versions.insert(entity_id, version);
+        self
+    }
+
+    /// Get the current version of an entity (for optimistic locking).
+    pub fn get_version(&self, entity_id: &[u8; 16]) -> Result<Option<u64>, Error> {
+        match self.engine.get_latest(entity_id)? {
+            Some((version, _)) => Ok(Some(version)),
+            None => Ok(None),
+        }
+    }
+
+    /// Check if an entity is in the write set.
+    pub fn is_writing(&self, entity_id: &[u8; 16]) -> bool {
+        self.write_set.contains(entity_id)
+    }
+
+    /// Get the pending operations.
+    pub fn operations(&self) -> &[TransactionOp] {
+        &self.ops
+    }
+
+    /// Get the number of pending operations.
+    pub fn operation_count(&self) -> usize {
+        self.ops.len()
     }
 
     /// Commit the transaction atomically.
     ///
     /// All operations succeed or none do.
+    /// Checks for version conflicts before committing.
     pub fn commit(self) -> Result<(), Error> {
+        // Check expected versions before committing
+        self.check_version_conflicts()?;
+
         if self.ops.is_empty() {
             return Ok(());
         }
 
         let data_tree = self.engine.data_tree();
         let meta_tree = self.engine.meta_tree();
+        let type_index_tree = self.engine.type_index_tree();
 
         // Execute all operations in a sled transaction
-        let result: Result<(), sled::transaction::TransactionError<Error>> = (data_tree, meta_tree)
-            .transaction(|(data_tx, meta_tx)| {
+        let result: Result<(), sled::transaction::TransactionError<Error>> =
+            (data_tree, meta_tree, type_index_tree).transaction(|(data_tx, meta_tx, type_tx)| {
                 for op in &self.ops {
                     match op {
-                        TransactionOp::Put { key, record } => {
+                        TransactionOp::Put {
+                            entity_type,
+                            key,
+                            record,
+                        } => {
                             Self::execute_put(data_tx, meta_tx, key, record)?;
+                            // Add to type index if entity type is specified
+                            if !entity_type.is_empty() {
+                                Self::execute_type_index(type_tx, entity_type, &key.entity_id)?;
+                            }
                         }
-                        TransactionOp::Delete { entity_id } => {
+                        TransactionOp::Delete {
+                            entity_type: _,
+                            entity_id,
+                        } => {
                             Self::execute_delete(data_tx, meta_tx, entity_id)?;
+                        }
+                        TransactionOp::Update {
+                            entity_type,
+                            entity_id,
+                            record,
+                        } => {
+                            let key = VersionedKey::now(*entity_id);
+                            Self::execute_put(data_tx, meta_tx, &key, record)?;
+                            // Update type index if entity type is specified
+                            if !entity_type.is_empty() {
+                                Self::execute_type_index(type_tx, entity_type, entity_id)?;
+                            }
                         }
                     }
                 }
@@ -80,10 +293,43 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// Check for version conflicts on expected versions.
+    fn check_version_conflicts(&self) -> Result<(), Error> {
+        for (entity_id, expected_version) in &self.expected_versions {
+            let actual_version = match self.engine.get_latest(entity_id)? {
+                Some((version, _)) => version,
+                None => 0,
+            };
+
+            if actual_version != *expected_version {
+                return Err(Error::TransactionConflict {
+                    entity_id: *entity_id,
+                    expected: *expected_version,
+                    actual: actual_version,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Rollback the transaction (discard all pending operations).
     pub fn rollback(self) {
         // Simply drop self, discarding all pending operations
         drop(self.ops);
+    }
+
+    /// Execute a type index update within a transaction.
+    fn execute_type_index(
+        type_tx: &TransactionalTree,
+        entity_type: &str,
+        entity_id: &[u8; 16],
+    ) -> Result<(), ConflictableTransactionError<Error>> {
+        let mut key = Vec::with_capacity(entity_type.len() + 1 + 16);
+        key.extend_from_slice(entity_type.as_bytes());
+        key.push(0); // Null separator
+        key.extend_from_slice(entity_id);
+        type_tx.insert(key, &[])?;
+        Ok(())
     }
 
     /// Execute a put operation within a transaction.
@@ -225,5 +471,179 @@ mod tests {
         // Empty transaction should succeed
         let tx = engine.transaction();
         tx.commit().unwrap();
+    }
+
+    #[test]
+    fn test_transaction_read_within_tx() {
+        let engine = test_engine();
+        let entity_id = StorageEngine::generate_id();
+
+        // Insert a record outside transaction
+        engine
+            .put(VersionedKey::new(entity_id, 100), Record::new(vec![1, 2, 3]))
+            .unwrap();
+
+        // Read within a transaction
+        let mut tx = engine.transaction();
+        let record = tx.read(&entity_id).unwrap().unwrap();
+        assert_eq!(record.data, vec![1, 2, 3]);
+
+        // Read set should be populated
+        assert!(tx.read_set.contains_key(&entity_id));
+    }
+
+    #[test]
+    fn test_transaction_read_uncommitted_write() {
+        let engine = test_engine();
+        let entity_id = StorageEngine::generate_id();
+
+        // Insert within transaction
+        let mut tx = engine.transaction();
+        tx.insert("TestEntity", entity_id, Record::new(vec![42]));
+
+        // Read should return the uncommitted write
+        let record = tx.read(&entity_id).unwrap().unwrap();
+        assert_eq!(record.data, vec![42]);
+    }
+
+    #[test]
+    fn test_transaction_exists() {
+        let engine = test_engine();
+        let id1 = StorageEngine::generate_id();
+        let id2 = StorageEngine::generate_id();
+
+        // Insert one record
+        engine
+            .put(VersionedKey::new(id1, 100), Record::new(vec![1]))
+            .unwrap();
+
+        let mut tx = engine.transaction();
+
+        // Existing record should return true
+        assert!(tx.exists(&id1).unwrap());
+
+        // Non-existing record should return false
+        assert!(!tx.exists(&id2).unwrap());
+
+        // Insert id2 in transaction
+        tx.insert("TestEntity", id2, Record::new(vec![2]));
+
+        // Now id2 should exist (uncommitted)
+        assert!(tx.exists(&id2).unwrap());
+    }
+
+    #[test]
+    fn test_transaction_version_conflict() {
+        let engine = test_engine();
+        let entity_id = StorageEngine::generate_id();
+
+        // Insert a record at version 100
+        engine
+            .put(VersionedKey::new(entity_id, 100), Record::new(vec![1]))
+            .unwrap();
+
+        // Start a transaction expecting version 50 (wrong)
+        let mut tx = engine.transaction();
+        tx.expect_version(entity_id, 50);
+        tx.put(VersionedKey::new(entity_id, 200), Record::new(vec![2]));
+
+        // Commit should fail with TransactionConflict
+        let result = tx.commit();
+        assert!(result.is_err());
+        if let Err(Error::TransactionConflict {
+            expected, actual, ..
+        }) = result
+        {
+            assert_eq!(expected, 50);
+            assert_eq!(actual, 100);
+        } else {
+            panic!("Expected TransactionConflict error");
+        }
+    }
+
+    #[test]
+    fn test_transaction_version_match() {
+        let engine = test_engine();
+        let entity_id = StorageEngine::generate_id();
+
+        // Insert a record at version 100
+        engine
+            .put(VersionedKey::new(entity_id, 100), Record::new(vec![1]))
+            .unwrap();
+
+        // Start a transaction expecting correct version
+        let mut tx = engine.transaction();
+        tx.expect_version(entity_id, 100);
+        tx.put(VersionedKey::new(entity_id, 200), Record::new(vec![2]));
+
+        // Commit should succeed
+        tx.commit().unwrap();
+
+        // Verify the update
+        let (version, record) = engine.get_latest(&entity_id).unwrap().unwrap();
+        assert_eq!(version, 200);
+        assert_eq!(record.data, vec![2]);
+    }
+
+    #[test]
+    fn test_transaction_typed_put() {
+        let engine = test_engine();
+        let entity_id = StorageEngine::generate_id();
+
+        // Insert with entity type
+        let mut tx = engine.transaction();
+        tx.put_typed(
+            "TxTestUser",
+            VersionedKey::new(entity_id, 100),
+            Record::new(vec![1, 2, 3]),
+        );
+        tx.commit().unwrap();
+
+        // Should be indexed by type
+        let users: Vec<_> = engine
+            .scan_entity_type("TxTestUser")
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].0, entity_id);
+    }
+
+    #[test]
+    fn test_transaction_update() {
+        let engine = test_engine();
+        let entity_id = StorageEngine::generate_id();
+
+        // Insert initial record
+        engine
+            .put_typed("UpdateTestUser", VersionedKey::new(entity_id, 100), Record::new(vec![1]))
+            .unwrap();
+
+        // Update in transaction
+        let mut tx = engine.transaction();
+        tx.update("UpdateTestUser", entity_id, Record::new(vec![2, 3, 4]));
+        tx.commit().unwrap();
+
+        // Verify update
+        let (_, record) = engine.get_latest(&entity_id).unwrap().unwrap();
+        assert_eq!(record.data, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn test_transaction_delete_read_cache() {
+        let engine = test_engine();
+        let entity_id = StorageEngine::generate_id();
+
+        // Insert a record
+        engine
+            .put(VersionedKey::new(entity_id, 100), Record::new(vec![1]))
+            .unwrap();
+
+        // Delete in transaction and verify read returns None
+        let mut tx = engine.transaction();
+        tx.delete(entity_id);
+
+        // Read should return None for deleted entity
+        assert!(tx.read(&entity_id).unwrap().is_none());
+        assert!(!tx.exists(&entity_id).unwrap());
     }
 }

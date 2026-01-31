@@ -1,6 +1,7 @@
 //! Runtime value types for protocol messages.
 
 use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 /// A runtime value that can be serialized over the wire.
 ///
@@ -9,7 +10,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 ///
 /// Note: Arrays are typed (e.g., BoolArray, Int32Array) to avoid recursive
 /// type issues with rkyv serialization.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum Value {
     /// Null value.
     Null,

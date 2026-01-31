@@ -10,6 +10,9 @@ This document defines the implementation roadmap for ORMDB. Each phase includes 
 | **rkyv** | Zero-copy serialization |
 | **mimalloc** | Global memory allocator |
 | **async-nng** | Async messaging transport |
+| **pest/nom** | Query language parsing |
+| **rustyline** | Interactive REPL |
+| **clap** | CLI argument parsing |
 
 See `technology.md` for detailed rationale.
 
@@ -174,7 +177,66 @@ See `technology.md` for detailed rationale.
 
 ---
 
-## Phase 9: Observability
+## Phase 9: Query Language
+
+**Core tech:** pest/nom (parsing), ormdb-proto (IR target)
+
+### Deliverables
+- ORM-style query language parser (Prisma-like DSL)
+- Query language to GraphQuery IR compiler
+- Mutation language support (insert, update, delete, upsert)
+- Schema introspection queries
+- Error reporting with source locations
+
+### Query Language Examples
+```
+User.findMany().where(status == "active")
+User.findMany().include(posts).orderBy(createdAt.desc).limit(10)
+User.create({ name: "Alice", email: "alice@example.com" })
+User.update().where(id == "abc-123").set({ status: "inactive" })
+```
+
+### Success Criteria
+- Parse valid queries without panics
+- Compile to correct GraphQuery IR
+- Meaningful error messages with line/column info
+- Round-trip: parse -> compile -> execute -> results
+
+---
+
+## Phase 10: CLI Tool
+
+**Core tech:** clap (CLI), rustyline (REPL), ormdb-client, ormdb-lang
+
+### Deliverables
+- Interactive REPL with history and tab completion
+- Script file execution mode
+- Connection management (connect, disconnect, status)
+- Output formatting (table, JSON, CSV)
+- Query history persistence
+
+### CLI Examples
+```bash
+ormdb-cli --host tcp://localhost:9000              # Start REPL
+ormdb-cli --host tcp://localhost:9000 -f script.ormql  # Run script
+ormdb-cli --host tcp://localhost:9000 -c "User.findMany()"  # Single query
+```
+
+### REPL Commands
+```
+.connect, .disconnect, .status, .schema, .format, .history, .help, .exit
+```
+
+### Success Criteria
+- REPL starts and accepts queries
+- Tab completion for entity and field names
+- Query history persists across sessions
+- Scripts execute sequentially
+- Graceful error handling without crashes
+
+---
+
+## Phase 11: Observability
 
 **Core tech:** tracing
 
@@ -191,7 +253,107 @@ See `technology.md` for detailed rationale.
 
 ---
 
-## Phase 10: ORM Adapters
+## Phase 12: Hybrid Storage & Compaction
+
+**Core tech:** sled, rkyv
+
+### Deliverables
+- **Version Retention & Compaction**
+  - Configurable retention policy (TTL or version count)
+  - Background compaction thread
+  - Tombstone cleanup after retention period
+  - `StorageEngine::compact()` API
+  - Compaction metrics (versions cleaned, space reclaimed)
+
+- **Columnar Projections (Hybrid Storage)**
+  - Automatic columnar projection for all entities
+  - Dictionary encoding for string columns
+  - Projection pushdown in query executor
+  - Dual-write: row store + columnar store on every mutation
+
+- **Analytical Query Support**
+  - Aggregate functions: COUNT, SUM, AVG, MIN, MAX
+  - GROUP BY compilation to query plan
+  - HAVING clause evaluation
+  - Columnar scan optimization
+
+### Query Language Extensions
+```
+User.count()
+User.count().where(status == "active")
+User.aggregate({ count: true, sum: "balance", avg: "age" })
+User.groupBy("department").aggregate({ count: true, avg: "salary" })
+```
+
+### Success Criteria
+- Old versions cleaned up based on retention policy
+- Tombstones removed after retention period
+- `size_on_disk()` decreases after compaction
+- Compaction metrics exposed
+- `User.count()` works with columnar optimization
+- GROUP BY queries execute correctly
+- Projection pushdown reduces I/O
+
+---
+
+## Phase 13: CDC & Replication
+
+**Core tech:** sled, async-nng, rkyv
+
+### Deliverables
+- **Change Data Capture (CDC)**
+  - Persistent changelog tree with LSN ordering
+  - Change events emitted on every mutation
+  - Field-level diff tracking for UPDATEs
+  - Full before/after records (enables point-in-time recovery)
+  - Subscription filtering by entity type
+
+- **WAL Streaming**
+  - Log Sequence Number (LSN) tracking
+  - Streaming API: `stream_changes(from_lsn) -> Stream<ChangeEntry>`
+  - Batched change retrieval for efficiency
+  - Checkpoint/resume support
+
+- **Master-Slave Replication (Async)**
+  - Primary mode: Accept writes, emit WAL
+  - Replica mode: Apply WAL stream, reject writes
+  - Async replication (eventually consistent)
+  - Replication lag tracking
+  - Automatic failover detection (future enhancement)
+
+### CDC Entry Structure
+```rust
+pub struct ChangeLogEntry {
+    pub lsn: u64,
+    pub timestamp: u64,
+    pub entity_type: String,
+    pub entity_id: [u8; 16],
+    pub change_type: ChangeType,  // Insert, Update, Delete
+    pub changed_fields: Vec<String>,
+    pub before: Option<Vec<u8>>,  // Full previous record
+    pub after: Option<Vec<u8>>,   // Full new record
+    pub schema_version: u64,
+}
+```
+
+### CLI Commands
+```
+.replication status           Show replication role and lag
+.replication stream <lsn>     Stream changes from LSN
+```
+
+### Success Criteria
+- All mutations logged to changelog with LSN
+- `stream_changes(lsn)` returns ordered changes
+- Replica applies changes correctly
+- Writes rejected on replica
+- PubSubManager receives all change events
+- Replication lag tracked and exposed
+- Changelog compaction works with retention
+
+---
+
+## Phase 14: ORM Adapters
 
 **Core tech:** async-nng (transport)
 
@@ -208,7 +370,7 @@ See `technology.md` for detailed rationale.
 
 ---
 
-## Phase 11: Benchmarking & Tuning
+## Phase 15: Benchmarking & Tuning
 
 **Core tech:** all
 
@@ -218,6 +380,8 @@ See `technology.md` for detailed rationale.
   - Transactional writes
   - Schema migrations
   - Cache invalidation
+  - Columnar analytics queries
+  - Replication lag
 - Performance baselines established
 - Optimization passes as needed
 
@@ -226,6 +390,7 @@ See `technology.md` for detailed rationale.
 - Bounded internal query count for graph fetches
 - No write outages for grade A/B migrations
 - Stable pagination across relation includes
+- Aggregations complete efficiently via columnar storage
 
 ---
 
@@ -257,19 +422,31 @@ Phase 4         Phase 5         Phase 6     │
               Phase 8 (Security)
                     │
                     ▼
-              Phase 9 (Observability)
+              Phase 9 (Query Language)
                     │
                     ▼
-              Phase 10 (Adapters)
+              Phase 10 (CLI Tool)
                     │
                     ▼
-              Phase 11 (Benchmarks)
+              Phase 11 (Observability)
+                    │
+                    ▼
+              Phase 12 (Hybrid Storage & Compaction)
+                    │
+                    ▼
+              Phase 13 (CDC & Replication)
+                    │
+                    ▼
+              Phase 14 (ORM Adapters)
+                    │
+                    ▼
+              Phase 15 (Benchmarks)
 ```
 
 ## Current Status
 
-**Completed phases:** Phase 0 (Project Bootstrap), Phase 1 (Storage Foundation), Phase 2 (Semantic Catalog), Phase 3 (Protocol & Serialization), Phase 4 (Query Engine)
+**Completed phases:** Phase 0 (Project Bootstrap), Phase 1 (Storage Foundation), Phase 2 (Semantic Catalog), Phase 3 (Protocol & Serialization), Phase 4 (Query Engine), Phase 5 (Transport Layer), Phase 6 (Transactions & Constraints), Phase 7 (Migration Engine), Phase 8 (Security & Policies), Phase 9 (Query Language), Phase 10 (CLI Tool), Phase 11 (Observability)
 
-**Active phase:** None
+**Active phase:** Phase 12 - Hybrid Storage & Compaction
 
-**Next step:** Begin Phase 5 - Transport Layer
+**Next step:** Implement RetentionPolicy configuration and CompactionEngine

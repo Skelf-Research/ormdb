@@ -3,18 +3,22 @@
 //! This module implements the query executor that compiles GraphQuery IR into
 //! execution plans and returns EntityBlock/EdgeBlock results.
 
+mod aggregate;
 mod cache;
 mod cost;
 mod executor;
+mod explain;
 mod filter;
 mod join;
 mod planner;
 mod statistics;
 mod value_codec;
 
+pub use aggregate::AggregateExecutor;
 pub use cache::{CacheStats, CachedPlan, PlanCache, QueryFingerprint};
 pub use cost::{CostEstimate, CostModel};
 pub use executor::QueryExecutor;
+pub use explain::ExplainService;
 pub use filter::FilterEvaluator;
 pub use join::{execute_join, EntityRow, HashJoinExecutor, JoinStrategy, NestedLoopExecutor};
 pub use planner::{estimate_fanout, FanoutBudget, IncludePlan, QueryPlan, QueryPlanner};

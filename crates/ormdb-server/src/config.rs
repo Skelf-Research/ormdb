@@ -1,6 +1,7 @@
 //! Server configuration.
 
 use clap::Parser;
+use ormdb_core::storage::RetentionPolicy;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -12,6 +13,9 @@ pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Default maximum message size (64 MB).
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
+/// Default compaction interval in seconds (1 hour).
+pub const DEFAULT_COMPACTION_INTERVAL_SECS: u64 = 3600;
 
 /// ORMDB Server configuration.
 #[derive(Debug, Clone)]
@@ -30,6 +34,12 @@ pub struct ServerConfig {
 
     /// Maximum message size in bytes.
     pub max_message_size: usize,
+
+    /// Version retention policy for compaction.
+    pub retention_policy: RetentionPolicy,
+
+    /// Interval between automatic compaction runs. None disables auto-compaction.
+    pub compaction_interval: Option<Duration>,
 }
 
 impl ServerConfig {
@@ -41,6 +51,8 @@ impl ServerConfig {
             data_path: data_path.into(),
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
+            retention_policy: RetentionPolicy::default(),
+            compaction_interval: Some(Duration::from_secs(DEFAULT_COMPACTION_INTERVAL_SECS)),
         }
     }
 
@@ -74,9 +86,32 @@ impl ServerConfig {
         self
     }
 
+    /// Set the retention policy for version compaction.
+    pub fn with_retention_policy(mut self, policy: RetentionPolicy) -> Self {
+        self.retention_policy = policy;
+        self
+    }
+
+    /// Set the compaction interval.
+    pub fn with_compaction_interval(mut self, interval: Duration) -> Self {
+        self.compaction_interval = Some(interval);
+        self
+    }
+
+    /// Disable automatic compaction.
+    pub fn without_compaction(mut self) -> Self {
+        self.compaction_interval = None;
+        self
+    }
+
     /// Check if at least one transport is configured.
     pub fn has_transport(&self) -> bool {
         self.tcp_address.is_some() || self.ipc_address.is_some()
+    }
+
+    /// Check if automatic compaction is enabled.
+    pub fn has_compaction(&self) -> bool {
+        self.compaction_interval.is_some()
     }
 }
 
@@ -114,6 +149,14 @@ pub struct Args {
     /// Disable TCP transport (requires --ipc to be set).
     #[arg(long)]
     pub no_tcp: bool,
+
+    /// Compaction interval in seconds. Set to 0 to disable auto-compaction.
+    #[arg(long, default_value_t = DEFAULT_COMPACTION_INTERVAL_SECS)]
+    pub compaction_interval: u64,
+
+    /// Maximum versions to keep per entity.
+    #[arg(long, default_value_t = 100)]
+    pub max_versions: usize,
 }
 
 impl Args {
@@ -121,12 +164,22 @@ impl Args {
     pub fn into_config(self) -> ServerConfig {
         let tcp_address = if self.no_tcp { None } else { Some(self.tcp) };
 
+        let compaction_interval = if self.compaction_interval == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(self.compaction_interval))
+        };
+
+        let retention_policy = RetentionPolicy::with_max_versions(self.max_versions);
+
         ServerConfig {
             tcp_address,
             ipc_address: self.ipc,
             data_path: self.data_path,
             request_timeout: Duration::from_secs(self.timeout),
             max_message_size: self.max_message_mb * 1024 * 1024,
+            retention_policy,
+            compaction_interval,
         }
     }
 }
