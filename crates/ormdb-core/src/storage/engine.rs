@@ -1,7 +1,8 @@
 //! Storage engine implementation.
 
-use super::{Record, StorageConfig, VersionedKey};
+use super::{BTreeIndex, ColumnarStore, HashIndex, Record, StorageConfig, VersionedKey};
 use crate::error::Error;
+use crate::query::decode_entity;
 use sled::{Db, Tree};
 
 /// Tree name for entity data.
@@ -29,6 +30,15 @@ pub struct StorageEngine {
 
     /// Tree for entity type index (entity_type + entity_id -> empty).
     type_index_tree: Tree,
+
+    /// Columnar store for efficient column-oriented queries.
+    columnar: ColumnarStore,
+
+    /// Hash index for O(1) equality lookups.
+    hash_index: HashIndex,
+
+    /// B-tree index for O(log N) range lookups.
+    btree_index: Option<BTreeIndex>,
 }
 
 impl StorageEngine {
@@ -39,12 +49,32 @@ impl StorageEngine {
         let data_tree = db.open_tree(DATA_TREE)?;
         let meta_tree = db.open_tree(META_TREE)?;
         let type_index_tree = db.open_tree(TYPE_INDEX_TREE)?;
+        let columnar = ColumnarStore::open(&db)?;
+        let hash_index = HashIndex::open(&db)?;
+
+        // Open B-tree index at a path alongside the sled database
+        let btree_index = if let Some(path) = config.path() {
+            let btree_path = path.join("btree_index");
+            match BTreeIndex::open(&btree_path) {
+                Ok(idx) => Some(idx),
+                Err(e) => {
+                    // Log but don't fail - B-tree index is optional enhancement
+                    tracing::warn!("Failed to open B-tree index: {:?}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         Ok(Self {
             db,
             data_tree,
             meta_tree,
             type_index_tree,
+            columnar,
+            hash_index,
+            btree_index,
         })
     }
 
@@ -180,6 +210,8 @@ impl StorageEngine {
     /// Put a versioned record with entity type indexing.
     ///
     /// This stores the record and also indexes it by entity type for efficient scanning.
+    /// Also updates the columnar store for efficient column-oriented queries when the
+    /// record data is valid entity data.
     pub fn put_typed(
         &self,
         entity_type: &str,
@@ -187,11 +219,19 @@ impl StorageEngine {
         record: Record,
     ) -> Result<(), Error> {
         // Store the record using the standard put
-        self.put(key, record)?;
+        self.put(key, record.clone())?;
 
         // Add to entity type index
         let index_key = self.type_index_key(entity_type, &key.entity_id);
         self.type_index_tree.insert(index_key, &[])?;
+
+        // Try to decode fields for columnar storage
+        // This is best-effort - if the data isn't valid entity format, skip columnar update
+        if let Ok(fields) = decode_entity(&record.data) {
+            if let Ok(projection) = self.columnar.projection(entity_type) {
+                let _ = projection.update_row(&key.entity_id, &fields);
+            }
+        }
 
         Ok(())
     }
@@ -351,6 +391,21 @@ impl StorageEngine {
     /// Get the underlying sled database (for opening new trees).
     pub fn db(&self) -> &Db {
         &self.db
+    }
+
+    /// Get access to the columnar store.
+    pub fn columnar(&self) -> &ColumnarStore {
+        &self.columnar
+    }
+
+    /// Get the hash index for O(1) equality lookups.
+    pub fn hash_index(&self) -> &HashIndex {
+        &self.hash_index
+    }
+
+    /// Get the B-tree index for O(log N) range lookups, if available.
+    pub fn btree_index(&self) -> Option<&BTreeIndex> {
+        self.btree_index.as_ref()
     }
 }
 

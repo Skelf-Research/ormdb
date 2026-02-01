@@ -1,0 +1,78 @@
+[package]
+name = "ormdb-bench"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ormdb-core.workspace = true
+ormdb-proto.workspace = true
+ormdb-server = { path = "../ormdb-server" }
+ormdb-client.workspace = true
+sled.workspace = true
+tempfile = "3"
+rand.workspace = true
+uuid = { version = "1", features = ["v4"] }
+tokio.workspace = true
+rkyv.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hex.workspace = true
+
+# Comparison backends
+rusqlite.workspace = true
+sqlx = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[features]
+default = []
+postgres = ["sqlx"]
+
+[[bench]]
+name = "storage"
+harness = false
+
+[[bench]]
+name = "query"
+harness = false
+
+[[bench]]
+name = "mutation"
+harness = false
+
+[[bench]]
+name = "serialization"
+harness = false
+
+[[bench]]
+name = "filter"
+harness = false
+
+[[bench]]
+name = "join"
+harness = false
+
+[[bench]]
+name = "cache"
+harness = false
+
+[[bench]]
+name = "e2e"
+harness = false
+
+[[bench]]
+name = "baseline"
+harness = false
+
+[[bench]]
+name = "vs_sqlite"
+harness = false
+
+[[bench]]
+name = "vs_postgres"
+harness = false
+required-features = ["postgres"]

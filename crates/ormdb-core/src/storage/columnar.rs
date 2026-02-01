@@ -148,6 +148,118 @@ impl<'a> ColumnarProjection<'a> {
         }
     }
 
+    // ========== Streaming Filtered Scan Methods ==========
+
+    /// Scan a column and return only (entity_id, value) pairs matching the predicate.
+    ///
+    /// Supports early termination via iterator - consumer can stop iterating at any time.
+    /// This is more efficient than scan_column() + filter when you have selective predicates.
+    pub fn scan_column_filtered<'b, F>(
+        &'b self,
+        column_name: &str,
+        predicate: F,
+    ) -> impl Iterator<Item = Result<([u8; 16], Value), Error>> + 'b
+    where
+        F: Fn(&Value) -> bool + 'b,
+    {
+        let prefix = self.column_prefix(column_name);
+        let prefix_len = prefix.len();
+
+        self.tree.scan_prefix(&prefix).filter_map(move |result| {
+            match result {
+                Ok((key, value)) => {
+                    // Extract entity_id from key
+                    if key.len() != prefix_len + 16 {
+                        return Some(Err(Error::InvalidKey));
+                    }
+                    let mut entity_id = [0u8; 16];
+                    entity_id.copy_from_slice(&key[prefix_len..]);
+
+                    // Decode value
+                    match self.decode_value(&value) {
+                        Ok(decoded) => {
+                            if predicate(&decoded) {
+                                Some(Ok((entity_id, decoded)))
+                            } else {
+                                None // Filter out non-matching
+                            }
+                        }
+                        Err(e) => Some(Err(e)),
+                    }
+                }
+                Err(e) => Some(Err(e.into())),
+            }
+        })
+    }
+
+    /// Efficient equality scan - returns entity IDs where column equals target value.
+    ///
+    /// This is optimized for the common WHERE field = value pattern.
+    pub fn scan_column_eq<'b>(
+        &'b self,
+        column_name: &str,
+        target: &'b Value,
+    ) -> impl Iterator<Item = Result<[u8; 16], Error>> + 'b {
+        self.scan_column_filtered(column_name, move |v| values_equal(v, target))
+            .map(|result| result.map(|(id, _)| id))
+    }
+
+    /// Fetch specific columns for a set of entity IDs.
+    ///
+    /// More efficient than scan_columns() when you already know which IDs you want,
+    /// as it uses point lookups instead of scanning.
+    pub fn fetch_columns_for_ids(
+        &self,
+        entity_ids: &[[u8; 16]],
+        column_names: &[&str],
+    ) -> Result<HashMap<[u8; 16], HashMap<String, Value>>, Error> {
+        let mut result: HashMap<[u8; 16], HashMap<String, Value>> = HashMap::new();
+
+        for &id in entity_ids {
+            let mut fields = HashMap::new();
+            for &column_name in column_names {
+                if let Some(value) = self.get_column(&id, column_name)? {
+                    fields.insert(column_name.to_string(), value);
+                }
+            }
+            if !fields.is_empty() {
+                result.insert(id, fields);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Streaming multi-column scan that yields one entity at a time.
+    ///
+    /// Unlike scan_columns(), this doesn't collect all results first.
+    /// Uses the first column as the "driver" and fetches other columns per entity.
+    /// Supports early termination via iterator consumption.
+    pub fn scan_columns_iter<'b>(
+        &'b self,
+        column_names: &'b [&str],
+    ) -> impl Iterator<Item = Result<([u8; 16], HashMap<String, Value>), Error>> + 'b {
+        let first_column = column_names.first().copied().unwrap_or("");
+        let other_columns: Vec<&str> = column_names.iter().skip(1).copied().collect();
+
+        self.scan_column(first_column).map(move |result| {
+            let (entity_id, first_value) = result?;
+            let mut fields = HashMap::new();
+            fields.insert(first_column.to_string(), first_value);
+
+            // Fetch other columns for this entity using point lookups
+            for &col in &other_columns {
+                if let Some(value) = self.get_column(&entity_id, col)? {
+                    fields.insert(col.to_string(), value);
+                }
+            }
+
+            Ok((entity_id, fields))
+        })
+    }
+
+    // ========== End Streaming Filtered Scan Methods ==========
+
     /// Count non-null values in a column.
     pub fn count_column(&self, column_name: &str) -> Result<u64, Error> {
         let prefix = self.column_prefix(column_name);
@@ -707,6 +819,27 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             let fb = value_to_f64(b);
             fa.partial_cmp(&fb).unwrap_or(Ordering::Equal)
         }
+    }
+}
+
+/// Check if two values are equal with type coercion for numeric types.
+pub fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Int32(a), Value::Int32(b)) => a == b,
+        (Value::Int64(a), Value::Int64(b)) => a == b,
+        (Value::Int32(a), Value::Int64(b)) => (*a as i64) == *b,
+        (Value::Int64(a), Value::Int32(b)) => *a == (*b as i64),
+        (Value::Float32(a), Value::Float32(b)) => a == b,
+        (Value::Float64(a), Value::Float64(b)) => a == b,
+        (Value::Float32(a), Value::Float64(b)) => (*a as f64) == *b,
+        (Value::Float64(a), Value::Float32(b)) => *a == (*b as f64),
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Bytes(a), Value::Bytes(b)) => a == b,
+        (Value::Uuid(a), Value::Uuid(b)) => a == b,
+        (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
+        _ => false,
     }
 }
 

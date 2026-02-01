@@ -144,6 +144,8 @@ pub fn decode_fields(data: &[u8], field_names: &[String]) -> Result<Vec<(String,
 }
 
 /// Get a single field value by name.
+///
+/// Uses skip_value() to avoid decoding values for non-matching fields.
 pub fn get_field(data: &[u8], field_name: &str) -> Result<Option<Value>, Error> {
     let mut cursor = 0;
 
@@ -169,16 +171,144 @@ pub fn get_field(data: &[u8], field_name: &str) -> Result<Option<Value>, Error> 
             .map_err(|_| Error::InvalidData("Invalid UTF-8 in field name".into()))?;
         cursor += name_len;
 
-        // Read value
-        let (value, bytes_read) = decode_value(&data[cursor..])?;
-        cursor += bytes_read;
-
         if name == field_name {
+            // Decode and return the matching field
+            let (value, _) = decode_value(&data[cursor..])?;
             return Ok(Some(value));
+        } else {
+            // Skip this value without decoding
+            let skip_bytes = skip_value(&data[cursor..])?;
+            cursor += skip_bytes;
         }
     }
 
     Ok(None)
+}
+
+/// Get multiple fields by name in a single pass.
+///
+/// More efficient than calling get_field() multiple times because it only
+/// makes one pass through the data and uses skip_value() for non-matching fields.
+pub fn get_fields_fast(data: &[u8], field_names: &[&str]) -> Result<Vec<(String, Value)>, Error> {
+    use std::collections::HashSet;
+
+    let name_set: HashSet<&str> = field_names.iter().copied().collect();
+    let mut cursor = 0;
+    let mut result = Vec::with_capacity(field_names.len());
+
+    // Read field count
+    if data.len() < 4 {
+        return Err(Error::InvalidData("Data too short for field count".into()));
+    }
+    let count = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+    cursor += 4;
+
+    for _ in 0..count {
+        // Read field name
+        if cursor + 2 > data.len() {
+            return Err(Error::InvalidData("Data too short for field name length".into()));
+        }
+        let name_len = u16::from_le_bytes(data[cursor..cursor + 2].try_into().unwrap()) as usize;
+        cursor += 2;
+
+        if cursor + name_len > data.len() {
+            return Err(Error::InvalidData("Data too short for field name".into()));
+        }
+        let name = std::str::from_utf8(&data[cursor..cursor + name_len])
+            .map_err(|_| Error::InvalidData("Invalid UTF-8 in field name".into()))?;
+        cursor += name_len;
+
+        if name_set.contains(name) {
+            // Decode the matching field
+            let (value, bytes_read) = decode_value(&data[cursor..])?;
+            cursor += bytes_read;
+            result.push((name.to_string(), value));
+
+            // Early exit if we found all requested fields
+            if result.len() == field_names.len() {
+                break;
+            }
+        } else {
+            // Skip this value without decoding
+            let skip_bytes = skip_value(&data[cursor..])?;
+            cursor += skip_bytes;
+        }
+    }
+
+    Ok(result)
+}
+
+/// Skip a value without decoding it.
+///
+/// Returns the number of bytes to skip (including the tag byte).
+/// This is much faster than decode_value() when you don't need the value.
+pub fn skip_value(data: &[u8]) -> Result<usize, Error> {
+    if data.is_empty() {
+        return Err(Error::InvalidData("Empty data for value".into()));
+    }
+
+    let tag = ValueTag::try_from(data[0])?;
+
+    let size = match tag {
+        ValueTag::Null => 1,
+        ValueTag::Bool => 2, // tag + 1 byte
+        ValueTag::Int32 | ValueTag::Float32 => 5, // tag + 4 bytes
+        ValueTag::Int64 | ValueTag::Float64 | ValueTag::Timestamp => 9, // tag + 8 bytes
+        ValueTag::Uuid => 17, // tag + 16 bytes
+        ValueTag::String | ValueTag::Bytes => {
+            if data.len() < 5 {
+                return Err(Error::InvalidData("Data too short for string/bytes length".into()));
+            }
+            let len = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+            5 + len // tag + 4 byte length + content
+        }
+        ValueTag::BoolArray => {
+            if data.len() < 5 {
+                return Err(Error::InvalidData("Data too short for bool array length".into()));
+            }
+            let len = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+            5 + len // tag + 4 byte length + len bools
+        }
+        ValueTag::Int32Array | ValueTag::Float32Array => {
+            if data.len() < 5 {
+                return Err(Error::InvalidData("Data too short for i32/f32 array length".into()));
+            }
+            let len = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+            5 + len * 4 // tag + 4 byte length + len * 4 bytes
+        }
+        ValueTag::Int64Array | ValueTag::Float64Array => {
+            if data.len() < 5 {
+                return Err(Error::InvalidData("Data too short for i64/f64 array length".into()));
+            }
+            let len = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+            5 + len * 8 // tag + 4 byte length + len * 8 bytes
+        }
+        ValueTag::UuidArray => {
+            if data.len() < 5 {
+                return Err(Error::InvalidData("Data too short for uuid array length".into()));
+            }
+            let len = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+            5 + len * 16 // tag + 4 byte length + len * 16 bytes
+        }
+        ValueTag::StringArray => {
+            // Need to iterate through strings to compute size
+            if data.len() < 5 {
+                return Err(Error::InvalidData("Data too short for string array length".into()));
+            }
+            let array_len = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+            let mut cursor = 5;
+            for _ in 0..array_len {
+                if cursor + 4 > data.len() {
+                    return Err(Error::InvalidData("Data too short for string length in array".into()));
+                }
+                let str_len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+                cursor += 4 + str_len;
+            }
+            cursor
+        }
+    };
+
+    Ok(size)
 }
 
 /// Encode a single value to the buffer.

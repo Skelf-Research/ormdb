@@ -3,8 +3,60 @@
 //! This module provides the `FilterEvaluator` that evaluates filter expressions
 //! from the query IR against entity field values.
 
+use std::collections::HashSet;
+
 use crate::error::Error;
 use ormdb_proto::{FilterExpr, SimpleFilter, Value};
+
+/// Extract all field names referenced in a filter expression.
+pub fn extract_filter_fields(filter: &FilterExpr) -> HashSet<String> {
+    let mut fields = HashSet::new();
+    extract_filter_fields_inner(filter, &mut fields);
+    fields
+}
+
+fn extract_filter_fields_inner(filter: &FilterExpr, fields: &mut HashSet<String>) {
+    match filter {
+        FilterExpr::Eq { field, .. }
+        | FilterExpr::Ne { field, .. }
+        | FilterExpr::Lt { field, .. }
+        | FilterExpr::Le { field, .. }
+        | FilterExpr::Gt { field, .. }
+        | FilterExpr::Ge { field, .. }
+        | FilterExpr::In { field, .. }
+        | FilterExpr::NotIn { field, .. }
+        | FilterExpr::IsNull { field }
+        | FilterExpr::IsNotNull { field }
+        | FilterExpr::Like { field, .. }
+        | FilterExpr::NotLike { field, .. } => {
+            fields.insert(field.clone());
+        }
+        FilterExpr::And(simple_filters) | FilterExpr::Or(simple_filters) => {
+            for sf in simple_filters {
+                extract_simple_filter_fields(sf, fields);
+            }
+        }
+    }
+}
+
+fn extract_simple_filter_fields(filter: &SimpleFilter, fields: &mut HashSet<String>) {
+    match filter {
+        SimpleFilter::Eq { field, .. }
+        | SimpleFilter::Ne { field, .. }
+        | SimpleFilter::Lt { field, .. }
+        | SimpleFilter::Le { field, .. }
+        | SimpleFilter::Gt { field, .. }
+        | SimpleFilter::Ge { field, .. }
+        | SimpleFilter::In { field, .. }
+        | SimpleFilter::NotIn { field, .. }
+        | SimpleFilter::IsNull { field }
+        | SimpleFilter::IsNotNull { field }
+        | SimpleFilter::Like { field, .. }
+        | SimpleFilter::NotLike { field, .. } => {
+            fields.insert(field.clone());
+        }
+    }
+}
 
 /// Evaluates filter expressions against entity data.
 pub struct FilterEvaluator;

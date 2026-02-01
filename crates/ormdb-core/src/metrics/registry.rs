@@ -39,6 +39,16 @@ pub struct MetricsRegistry {
     // Fanout metrics
     fanout_total: AtomicU64,
     fanout_budget_exceeded: AtomicU64,
+
+    // Access path metrics
+    access_path_hash: AtomicU64,
+    access_path_bf_tree: AtomicU64,
+    access_path_columnar: AtomicU64,
+    access_path_row: AtomicU64,
+
+    // Join strategy metrics
+    join_nested_loop: AtomicU64,
+    join_hash: AtomicU64,
 }
 
 /// Mutation type for metrics tracking.
@@ -52,6 +62,28 @@ pub enum MutationType {
     Delete,
     /// Upsert operation.
     Upsert,
+}
+
+/// Query access path classification for metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessPath {
+    /// Equality lookup using hash index.
+    HashIndex,
+    /// Range/ordered lookup using BF-tree (or equivalent ordered index).
+    BfTree,
+    /// Columnar projection scan.
+    Columnar,
+    /// Row-based scan.
+    Row,
+}
+
+/// Join strategy classification for metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinStrategyMetric {
+    /// Nested loop join.
+    NestedLoop,
+    /// Hash join.
+    HashJoin,
 }
 
 impl MetricsRegistry {
@@ -73,6 +105,12 @@ impl MetricsRegistry {
             cache_evictions: AtomicU64::new(0),
             fanout_total: AtomicU64::new(0),
             fanout_budget_exceeded: AtomicU64::new(0),
+            access_path_hash: AtomicU64::new(0),
+            access_path_bf_tree: AtomicU64::new(0),
+            access_path_columnar: AtomicU64::new(0),
+            access_path_row: AtomicU64::new(0),
+            join_nested_loop: AtomicU64::new(0),
+            join_hash: AtomicU64::new(0),
         }
     }
 
@@ -132,6 +170,36 @@ impl MetricsRegistry {
     /// Record a fanout budget exceeded error.
     pub fn record_budget_exceeded(&self) {
         self.fanout_budget_exceeded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record the access path used for query execution.
+    pub fn record_access_path(&self, path: AccessPath) {
+        match path {
+            AccessPath::HashIndex => {
+                self.access_path_hash.fetch_add(1, Ordering::Relaxed);
+            }
+            AccessPath::BfTree => {
+                self.access_path_bf_tree.fetch_add(1, Ordering::Relaxed);
+            }
+            AccessPath::Columnar => {
+                self.access_path_columnar.fetch_add(1, Ordering::Relaxed);
+            }
+            AccessPath::Row => {
+                self.access_path_row.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Record the join strategy used for include resolution.
+    pub fn record_join_strategy(&self, strategy: JoinStrategyMetric) {
+        match strategy {
+            JoinStrategyMetric::NestedLoop => {
+                self.join_nested_loop.fetch_add(1, Ordering::Relaxed);
+            }
+            JoinStrategyMetric::HashJoin => {
+                self.join_hash.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     // Getters
@@ -244,6 +312,24 @@ impl MetricsRegistry {
         self.fanout_budget_exceeded.load(Ordering::Relaxed)
     }
 
+    /// Get access path counts.
+    pub fn access_path_counts(&self) -> (u64, u64, u64, u64) {
+        (
+            self.access_path_hash.load(Ordering::Relaxed),
+            self.access_path_bf_tree.load(Ordering::Relaxed),
+            self.access_path_columnar.load(Ordering::Relaxed),
+            self.access_path_row.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Get join strategy counts.
+    pub fn join_strategy_counts(&self) -> (u64, u64) {
+        (
+            self.join_nested_loop.load(Ordering::Relaxed),
+            self.join_hash.load(Ordering::Relaxed),
+        )
+    }
+
     /// Export to Prometheus text format.
     pub fn to_prometheus(&self) -> String {
         let mut out = String::new();
@@ -257,6 +343,38 @@ impl MetricsRegistry {
         out.push_str("# HELP ormdb_queries_total Total queries executed\n");
         out.push_str("# TYPE ormdb_queries_total counter\n");
         out.push_str(&format!("ormdb_queries_total {}\n\n", self.query_count()));
+
+        // Access path metrics
+        out.push_str("# HELP ormdb_query_access_path_total Query access path usage\n");
+        out.push_str("# TYPE ormdb_query_access_path_total counter\n");
+        out.push_str(&format!(
+            "ormdb_query_access_path_total{{path=\"hash_index\"}} {}\n",
+            self.access_path_hash.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "ormdb_query_access_path_total{{path=\"bf_tree\"}} {}\n",
+            self.access_path_bf_tree.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "ormdb_query_access_path_total{{path=\"columnar\"}} {}\n",
+            self.access_path_columnar.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "ormdb_query_access_path_total{{path=\"row\"}} {}\n\n",
+            self.access_path_row.load(Ordering::Relaxed)
+        ));
+
+        // Join strategy metrics
+        out.push_str("# HELP ormdb_join_strategy_total Join strategy usage\n");
+        out.push_str("# TYPE ormdb_join_strategy_total counter\n");
+        out.push_str(&format!(
+            "ormdb_join_strategy_total{{strategy=\"nested_loop\"}} {}\n",
+            self.join_nested_loop.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "ormdb_join_strategy_total{{strategy=\"hash_join\"}} {}\n\n",
+            self.join_hash.load(Ordering::Relaxed)
+        ));
 
         out.push_str("# HELP ormdb_query_duration_us_avg Average query duration in microseconds\n");
         out.push_str("# TYPE ormdb_query_duration_us_avg gauge\n");

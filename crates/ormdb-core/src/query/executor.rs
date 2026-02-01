@@ -10,11 +10,12 @@ use tracing::{debug, instrument};
 
 use crate::catalog::Catalog;
 use crate::error::Error;
+use crate::metrics::{AccessPath, JoinStrategyMetric, SharedMetricsRegistry};
 use crate::storage::StorageEngine;
 
 use super::cache::{PlanCache, QueryFingerprint};
 use super::cost::CostModel;
-use super::filter::FilterEvaluator;
+use super::filter::{extract_filter_fields, FilterEvaluator};
 use super::join::{execute_join, EntityRow, JoinStrategy};
 use super::planner::{FanoutBudget, IncludePlan, QueryPlan, QueryPlanner};
 use super::statistics::TableStatistics;
@@ -28,12 +29,30 @@ use ormdb_proto::{
 pub struct QueryExecutor<'a> {
     storage: &'a StorageEngine,
     catalog: &'a Catalog,
+    metrics: Option<SharedMetricsRegistry>,
 }
 
 impl<'a> QueryExecutor<'a> {
     /// Create a new executor with storage and catalog references.
     pub fn new(storage: &'a StorageEngine, catalog: &'a Catalog) -> Self {
-        Self { storage, catalog }
+        Self {
+            storage,
+            catalog,
+            metrics: None,
+        }
+    }
+
+    /// Create a new executor with metrics tracking.
+    pub fn with_metrics(
+        storage: &'a StorageEngine,
+        catalog: &'a Catalog,
+        metrics: SharedMetricsRegistry,
+    ) -> Self {
+        Self {
+            storage,
+            catalog,
+            metrics: Some(metrics),
+        }
     }
 
     /// Execute a GraphQuery and return results.
@@ -57,8 +76,15 @@ impl<'a> QueryExecutor<'a> {
 
         // Execute the plan
         let result = self.execute_plan(&plan);
+        let duration_us = start.elapsed().as_micros() as u64;
 
-        debug!(duration_us = start.elapsed().as_micros() as u64, "query executed");
+        if let Some(metrics) = &self.metrics {
+            if result.is_ok() {
+                metrics.record_query(&query.root_entity, duration_us);
+            }
+        }
+
+        debug!(duration_us = duration_us, "query executed");
         result
     }
 
@@ -79,6 +105,7 @@ impl<'a> QueryExecutor<'a> {
         cache: &PlanCache,
         statistics: Option<&TableStatistics>,
     ) -> Result<QueryResult, Error> {
+        let start = std::time::Instant::now();
         let fingerprint = QueryFingerprint::from_query(query);
         let schema_version = self.catalog.current_version();
 
@@ -89,7 +116,14 @@ impl<'a> QueryExecutor<'a> {
             if statistics.is_some() {
                 plan.optimize_include_order();
             }
-            return self.execute_plan(&plan);
+            let result = self.execute_plan(&plan);
+            let duration_us = start.elapsed().as_micros() as u64;
+            if let Some(metrics) = &self.metrics {
+                if result.is_ok() {
+                    metrics.record_query(&query.root_entity, duration_us);
+                }
+            }
+            return result;
         }
 
         debug!(cache_hit = false, "compiling new plan");
@@ -108,7 +142,14 @@ impl<'a> QueryExecutor<'a> {
         cache.insert(fingerprint, plan.clone(), schema_version);
 
         // Execute
-        self.execute_plan(&plan)
+        let result = self.execute_plan(&plan);
+        let duration_us = start.elapsed().as_micros() as u64;
+        if let Some(metrics) = &self.metrics {
+            if result.is_ok() {
+                metrics.record_query(&query.root_entity, duration_us);
+            }
+        }
+        result
     }
 
     /// Execute a query with statistics for cost-based join strategy selection.
@@ -121,6 +162,7 @@ impl<'a> QueryExecutor<'a> {
         query: &GraphQuery,
         statistics: &TableStatistics,
     ) -> Result<QueryResult, Error> {
+        let start = std::time::Instant::now();
         let planner = QueryPlanner::new(self.catalog);
         let mut plan = planner.plan(query)?;
 
@@ -129,7 +171,14 @@ impl<'a> QueryExecutor<'a> {
         plan.deduplicate_includes();
 
         // Execute with cost model
-        self.execute_plan_with_cost_model(&plan, statistics)
+        let result = self.execute_plan_with_cost_model(&plan, statistics);
+        let duration_us = start.elapsed().as_micros() as u64;
+        if let Some(metrics) = &self.metrics {
+            if result.is_ok() {
+                metrics.record_query(&query.root_entity, duration_us);
+            }
+        }
+        result
     }
 
     /// Execute a pre-planned query using cost model for join strategy.
@@ -214,6 +263,7 @@ impl<'a> QueryExecutor<'a> {
             // Use cost model to estimate child count for strategy selection
             let estimated_child_count = cost_model.estimated_child_count(include);
             let strategy = JoinStrategy::select(source_ids.len(), estimated_child_count);
+            self.record_join_strategy(strategy);
 
             // Execute join with selected strategy
             let (mut rows, edges) = execute_join(strategy, self.storage, source_ids, include)?;
@@ -293,8 +343,419 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Fetch entities of a given type, applying filters.
+    ///
+    /// Automatically selects the optimal execution path:
+    /// - Hash index for simple equality filters (O(1) lookup)
+    /// - B-tree index for range filters (O(log N) lookup)
+    /// - Columnar path for complex filtered queries (streaming filter with early termination)
+    /// - Row-based path for unfiltered queries (simpler, fewer overhead)
+    ///
+    /// Both paths support early termination for LIMIT queries when no ORDER BY is specified.
     #[instrument(skip(self, plan), fields(entity = %plan.root_entity, has_filter = plan.filter.is_some()))]
     fn fetch_entities(&self, plan: &QueryPlan) -> Result<Vec<EntityRow>, Error> {
+        // Try hash index for simple equality filters (O(1) lookup)
+        if let Some(ormdb_proto::FilterExpr::Eq { field, value }) = &plan.filter {
+            // Check if hash index exists for this column
+            if self.storage.hash_index().has_index(&plan.root_entity, field)? {
+                debug!(path = "hash-index", field = %field, "using hash index for equality filter");
+                return self.fetch_entities_via_hash_index(plan, field, value);
+            }
+        }
+
+        // Try B-tree index for range filters (O(log N) lookup)
+        if let Some(btree) = self.storage.btree_index() {
+            match &plan.filter {
+                Some(ormdb_proto::FilterExpr::Gt { field, value }) => {
+                    if btree.has_index(&plan.root_entity, field)? {
+                        debug!(path = "btree-index", field = %field, op = "gt", "using B-tree index for range filter");
+                        return self.fetch_entities_via_btree_gt(plan, field, value, false);
+                    }
+                }
+                Some(ormdb_proto::FilterExpr::Ge { field, value }) => {
+                    if btree.has_index(&plan.root_entity, field)? {
+                        debug!(path = "btree-index", field = %field, op = "ge", "using B-tree index for range filter");
+                        return self.fetch_entities_via_btree_gt(plan, field, value, true);
+                    }
+                }
+                Some(ormdb_proto::FilterExpr::Lt { field, value }) => {
+                    if btree.has_index(&plan.root_entity, field)? {
+                        debug!(path = "btree-index", field = %field, op = "lt", "using B-tree index for range filter");
+                        return self.fetch_entities_via_btree_lt(plan, field, value, false);
+                    }
+                }
+                Some(ormdb_proto::FilterExpr::Le { field, value }) => {
+                    if btree.has_index(&plan.root_entity, field)? {
+                        debug!(path = "btree-index", field = %field, op = "le", "using B-tree index for range filter");
+                        return self.fetch_entities_via_btree_lt(plan, field, value, true);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Use columnar path for filtered queries - more efficient due to:
+        // 1. Two-phase streaming filter with early termination
+        // 2. Only needed columns are read
+        // 3. No per-row deserialization for non-matching entities
+        if plan.filter.is_some() {
+            debug!(path = "columnar", "using columnar path for filtered query");
+            return self.fetch_entities_columnar(plan);
+        }
+
+        // Use row-based path for unfiltered queries (simpler, avoids columnar overhead)
+        self.fetch_entities_row_based(plan)
+    }
+
+    /// Fetch entities using the columnar store with two-phase streaming filter.
+    ///
+    /// This is more efficient than row-based scanning because:
+    /// 1. Only needed columns are read (not all fields)
+    /// 2. No per-row deserialization overhead
+    /// 3. Better cache locality for column scans
+    /// 4. Streaming filter with early termination support
+    ///
+    /// Two-phase approach:
+    /// - Phase 1: Scan filter column(s) → Apply predicate → Collect matching IDs (with LIMIT)
+    /// - Phase 2: For matching IDs → Batch-fetch remaining columns → Build EntityRows
+    fn fetch_entities_columnar(&self, plan: &QueryPlan) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::Columnar);
+        let projection = self.storage.columnar().projection(&plan.root_entity)?;
+
+        // Early termination parameters
+        let can_early_terminate = plan.order_by.is_empty();
+        let target_count = if can_early_terminate {
+            plan.pagination
+                .as_ref()
+                .map(|p| (p.offset + p.limit) as usize)
+        } else {
+            None
+        };
+
+        // Determine which columns we need: filter fields + select fields
+        let filter_fields: HashSet<String> = plan
+            .filter
+            .as_ref()
+            .map(extract_filter_fields)
+            .unwrap_or_default();
+
+        let select_fields: HashSet<String> = if plan.fields.is_empty() {
+            // Get all field names from the entity definition in the catalog
+            plan.root_entity_def
+                .fields
+                .iter()
+                .map(|f| f.name.clone())
+                .collect()
+        } else {
+            plan.fields.iter().cloned().collect()
+        };
+
+        // PHASE 1: Collect matching entity IDs with streaming filter + early termination
+        let (matching_ids, filter_values) = self.collect_matching_ids_columnar(
+            &projection,
+            &plan.filter,
+            &filter_fields,
+            target_count,
+        )?;
+
+        if matching_ids.is_empty() {
+            debug!(rows_fetched = 0, path = "columnar-two-phase", "no matching entities");
+            return Ok(vec![]);
+        }
+
+        // PHASE 2: Batch-fetch remaining columns for matching IDs
+        let remaining_fields: Vec<&str> = select_fields
+            .iter()
+            .filter(|f| !filter_fields.contains(*f))
+            .map(|s| s.as_str())
+            .collect();
+
+        let additional_data = if remaining_fields.is_empty() {
+            // All needed fields were filter fields - already have them
+            HashMap::new()
+        } else {
+            projection.fetch_columns_for_ids(&matching_ids, &remaining_fields)?
+        };
+
+        // Build EntityRow results by combining filter values with fetched columns
+        let rows: Vec<EntityRow> = matching_ids
+            .into_iter()
+            .map(|id| {
+                let mut fields: Vec<(String, Value)> = Vec::new();
+
+                // Add filter field values (from phase 1)
+                if let Some(filter_vals) = filter_values.get(&id) {
+                    for (name, value) in filter_vals {
+                        if select_fields.contains(name) {
+                            fields.push((name.clone(), value.clone()));
+                        }
+                    }
+                }
+
+                // Add additional field values (from phase 2)
+                if let Some(additional) = additional_data.get(&id) {
+                    for (name, value) in additional {
+                        fields.push((name.clone(), value.clone()));
+                    }
+                }
+
+                EntityRow { id, fields }
+            })
+            .collect();
+
+        debug!(rows_fetched = rows.len(), path = "columnar-two-phase", "entities fetched");
+        Ok(rows)
+    }
+
+    /// Phase 1: Collect matching entity IDs with streaming filter + early termination.
+    ///
+    /// Returns (matching_ids, filter_field_values) where filter_field_values contains
+    /// the values of filter fields for each matching entity (to avoid re-fetching).
+    fn collect_matching_ids_columnar(
+        &self,
+        projection: &crate::storage::ColumnarProjection,
+        filter: &Option<ormdb_proto::FilterExpr>,
+        filter_fields: &HashSet<String>,
+        target_count: Option<usize>,
+    ) -> Result<(Vec<[u8; 16]>, HashMap<[u8; 16], HashMap<String, Value>>), Error> {
+        // For simple equality filters on a single field, use optimized path
+        if let Some(ormdb_proto::FilterExpr::Eq { field, value }) = filter {
+            return self.collect_ids_eq_filter(projection, field, value, target_count);
+        }
+
+        // For complex filters, scan filter columns and evaluate
+        let filter_field_names: Vec<&str> = filter_fields.iter().map(|s| s.as_str()).collect();
+
+        let mut matching_ids = Vec::new();
+        let mut filter_values: HashMap<[u8; 16], HashMap<String, Value>> = HashMap::new();
+
+        // Scan filter columns as a streaming iterator (supports early termination)
+        for item in projection.scan_columns_iter(&filter_field_names) {
+            let (entity_id, fields_map) = item?;
+
+            // Evaluate filter
+            if let Some(f) = filter {
+                let fields: Vec<(String, Value)> = fields_map.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if !FilterEvaluator::evaluate(f, &fields)? {
+                    continue;
+                }
+            }
+
+            matching_ids.push(entity_id);
+            filter_values.insert(entity_id, fields_map);
+
+            // Early termination
+            if let Some(target) = target_count {
+                if matching_ids.len() >= target {
+                    debug!(early_terminate = true, target = target, "stopping early - enough IDs collected");
+                    break;
+                }
+            }
+        }
+
+        Ok((matching_ids, filter_values))
+    }
+
+    /// Optimized path for simple WHERE field = value queries.
+    ///
+    /// Uses `scan_column_eq()` for efficient single-column equality scan with early termination.
+    fn collect_ids_eq_filter(
+        &self,
+        projection: &crate::storage::ColumnarProjection,
+        field: &str,
+        value: &Value,
+        target_count: Option<usize>,
+    ) -> Result<(Vec<[u8; 16]>, HashMap<[u8; 16], HashMap<String, Value>>), Error> {
+        let mut matching_ids = Vec::new();
+        let mut filter_values: HashMap<[u8; 16], HashMap<String, Value>> = HashMap::new();
+
+        // Use scan_column_eq for efficient equality scan
+        for result in projection.scan_column_eq(field, value) {
+            let entity_id = result?;
+            matching_ids.push(entity_id);
+
+            // Store the filter field value (we know it equals the target)
+            let mut fields = HashMap::new();
+            fields.insert(field.to_string(), value.clone());
+            filter_values.insert(entity_id, fields);
+
+            // Early termination
+            if let Some(target) = target_count {
+                if matching_ids.len() >= target {
+                    debug!(early_terminate = true, target = target, "stopping early - enough IDs collected (eq filter)");
+                    break;
+                }
+            }
+        }
+
+        Ok((matching_ids, filter_values))
+    }
+
+    /// Fetch entities using hash index for O(1) equality lookup.
+    ///
+    /// This is the fastest path for equality filters on indexed columns:
+    /// 1. O(1) hash index lookup to get matching entity IDs
+    /// 2. Batch fetch entities from row store (1 read per entity vs N reads for columnar)
+    /// 3. Apply LIMIT/offset
+    fn fetch_entities_via_hash_index(
+        &self,
+        plan: &QueryPlan,
+        field: &str,
+        value: &Value,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::HashIndex);
+        // O(1) lookup - get all entity IDs that match this value
+        let matching_ids = self.storage.hash_index().lookup(&plan.root_entity, field, value)?;
+
+        if matching_ids.is_empty() {
+            debug!(rows_fetched = 0, path = "hash-index", "no matching entities");
+            return Ok(vec![]);
+        }
+
+        // Apply early LIMIT if no ORDER BY (we can truncate IDs early)
+        let can_early_terminate = plan.order_by.is_empty();
+        let ids_to_fetch: &[[u8; 16]] = if can_early_terminate {
+            if let Some(ref pag) = plan.pagination {
+                let target = (pag.offset + pag.limit) as usize;
+                if matching_ids.len() > target {
+                    &matching_ids[..target]
+                } else {
+                    &matching_ids[..]
+                }
+            } else {
+                &matching_ids[..]
+            }
+        } else {
+            &matching_ids[..]
+        };
+
+        // Fetch entities from row store (1 read per entity, much faster than columnar)
+        // Row store keeps all fields together, so we avoid the N reads per entity overhead
+        let mut rows = Vec::with_capacity(ids_to_fetch.len());
+
+        for &id in ids_to_fetch {
+            if let Some((_version, record)) = self.storage.get_latest(&id)? {
+                let fields = decode_entity(&record.data)?;
+                rows.push(EntityRow { id, fields });
+            }
+        }
+
+        debug!(rows_fetched = rows.len(), path = "hash-index-row", "entities fetched via hash index + row store");
+        Ok(rows)
+    }
+
+    /// Fetch entities using B-tree index for greater-than (or greater-equal) range filter.
+    ///
+    /// This is O(log N + K) where K is the number of matching entities:
+    /// 1. B-tree range scan to get matching entity IDs
+    /// 2. Batch fetch entities from row store
+    fn fetch_entities_via_btree_gt(
+        &self,
+        plan: &QueryPlan,
+        field: &str,
+        value: &Value,
+        include_equal: bool,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::BfTree);
+        let btree = self.storage.btree_index().ok_or_else(|| {
+            Error::InvalidData("B-tree index not available".to_string())
+        })?;
+
+        // O(log N + K) scan
+        let matching_ids = if include_equal {
+            btree.scan_greater_equal(&plan.root_entity, field, value)?
+        } else {
+            btree.scan_greater_than(&plan.root_entity, field, value)?
+        };
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
+    /// Fetch entities using B-tree index for less-than (or less-equal) range filter.
+    ///
+    /// This is O(log N + K) where K is the number of matching entities:
+    /// 1. B-tree range scan to get matching entity IDs
+    /// 2. Batch fetch entities from row store
+    fn fetch_entities_via_btree_lt(
+        &self,
+        plan: &QueryPlan,
+        field: &str,
+        value: &Value,
+        include_equal: bool,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::BfTree);
+        let btree = self.storage.btree_index().ok_or_else(|| {
+            Error::InvalidData("B-tree index not available".to_string())
+        })?;
+
+        // O(log N + K) scan
+        let matching_ids = if include_equal {
+            btree.scan_less_equal(&plan.root_entity, field, value)?
+        } else {
+            btree.scan_less_than(&plan.root_entity, field, value)?
+        };
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
+    /// Fetch rows from row store for a list of entity IDs.
+    ///
+    /// Shared helper for index-based lookups (hash and B-tree).
+    fn fetch_rows_for_ids(
+        &self,
+        plan: &QueryPlan,
+        matching_ids: &[[u8; 16]],
+    ) -> Result<Vec<EntityRow>, Error> {
+        if matching_ids.is_empty() {
+            debug!(rows_fetched = 0, path = "index-row", "no matching entities");
+            return Ok(vec![]);
+        }
+
+        // Apply early LIMIT if no ORDER BY (we can truncate IDs early)
+        let can_early_terminate = plan.order_by.is_empty();
+        let ids_to_fetch: &[[u8; 16]] = if can_early_terminate {
+            if let Some(ref pag) = plan.pagination {
+                let target = (pag.offset + pag.limit) as usize;
+                if matching_ids.len() > target {
+                    &matching_ids[..target]
+                } else {
+                    matching_ids
+                }
+            } else {
+                matching_ids
+            }
+        } else {
+            matching_ids
+        };
+
+        // Fetch entities from row store (1 read per entity)
+        let mut rows = Vec::with_capacity(ids_to_fetch.len());
+
+        for &id in ids_to_fetch {
+            if let Some((_version, record)) = self.storage.get_latest(&id)? {
+                let fields = decode_entity(&record.data)?;
+                rows.push(EntityRow { id, fields });
+            }
+        }
+
+        debug!(rows_fetched = rows.len(), path = "index-row", "entities fetched via index + row store");
+        Ok(rows)
+    }
+
+    /// Fetch entities using the row store (fallback path).
+    fn fetch_entities_row_based(&self, plan: &QueryPlan) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::Row);
+        // Early termination optimization
+        let can_early_terminate = plan.order_by.is_empty();
+        let target_count = if can_early_terminate {
+            plan.pagination
+                .as_ref()
+                .map(|p| (p.offset + p.limit) as usize)
+        } else {
+            None
+        };
+
         let mut rows = Vec::new();
 
         for result in self.storage.scan_entity_type(&plan.root_entity) {
@@ -314,9 +775,17 @@ impl<'a> QueryExecutor<'a> {
                 id: entity_id,
                 fields,
             });
+
+            // Early termination
+            if let Some(target) = target_count {
+                if rows.len() >= target {
+                    debug!(early_terminate = true, target = target, "stopping early - enough rows collected");
+                    break;
+                }
+            }
         }
 
-        debug!(rows_fetched = rows.len(), "entities fetched");
+        debug!(rows_fetched = rows.len(), path = "row-based", "entities fetched");
         Ok(rows)
     }
 
@@ -540,6 +1009,7 @@ impl<'a> QueryExecutor<'a> {
         // TODO: Use statistics for better estimation of child count
         let estimated_child_count = 1000; // Conservative estimate
         let strategy = JoinStrategy::select(source_ids.len(), estimated_child_count);
+        self.record_join_strategy(strategy);
         debug!(strategy = ?strategy, "selected join strategy");
 
         // Execute the join
@@ -600,6 +1070,22 @@ impl<'a> QueryExecutor<'a> {
         }
 
         (result_rows, result_edges)
+    }
+
+    fn record_access_path(&self, path: AccessPath) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_access_path(path);
+        }
+    }
+
+    fn record_join_strategy(&self, strategy: JoinStrategy) {
+        if let Some(metrics) = &self.metrics {
+            let metric = match strategy {
+                JoinStrategy::NestedLoop => JoinStrategyMetric::NestedLoop,
+                JoinStrategy::HashJoin => JoinStrategyMetric::HashJoin,
+            };
+            metrics.record_join_strategy(metric);
+        }
     }
 }
 

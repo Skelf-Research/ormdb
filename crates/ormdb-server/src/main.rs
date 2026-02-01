@@ -5,6 +5,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use ormdb_core::metrics::new_shared_registry;
 use ormdb_server::{create_transport, Args, Database, RequestHandler};
 
 #[tokio::main]
@@ -42,7 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(schema_version, "database opened");
 
     // Create request handler
-    let handler = Arc::new(RequestHandler::new(Arc::new(database)));
+    let metrics = new_shared_registry();
+    let handler = Arc::new(RequestHandler::with_metrics(Arc::new(database), metrics));
 
     // Create transport
     let transport = create_transport(&config, handler)?;
