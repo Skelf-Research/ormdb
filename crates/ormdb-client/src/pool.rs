@@ -6,12 +6,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use ormdb_proto::mutation::{Mutation, MutationBatch};
-use ormdb_proto::query::GraphQuery;
-use ormdb_proto::result::{MutationResult, QueryResult};
-use ormdb_proto::{Request, Response, ResponsePayload, Status};
+use ormdb_proto::query::{AggregateQuery, GraphQuery};
+use ormdb_proto::replication::{ReplicationStatus, StreamChangesRequest, StreamChangesResponse};
+use ormdb_proto::result::{AggregateResult, MutationResult, QueryResult};
+use ormdb_proto::{ExplainResult, MetricsResult, Request, Response, ResponsePayload, Status};
 
 use crate::config::ClientConfig;
 use crate::connection::Connection;
@@ -85,6 +86,7 @@ impl Default for PoolConfig {
 pub struct PooledConnection {
     connection: Option<Connection>,
     pool: Arc<ConnectionPoolInner>,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 impl PooledConnection {
@@ -104,11 +106,12 @@ impl PooledConnection {
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
-        if let Some(conn) = self.connection.take() {
+        if let (Some(conn), Some(permit)) = (self.connection.take(), self.permit.take()) {
             // Return connection to pool
             let pool = self.pool.clone();
             tokio::spawn(async move {
                 pool.return_connection(conn).await;
+                drop(permit);
             });
         }
     }
@@ -118,14 +121,14 @@ impl Drop for PooledConnection {
 struct ConnectionPoolInner {
     config: PoolConfig,
     connections: Mutex<Vec<Connection>>,
-    semaphore: Semaphore,
+    semaphore: Arc<Semaphore>,
     next_request_id: AtomicU64,
     schema_version: AtomicU64,
 }
 
 impl ConnectionPoolInner {
     fn new(config: PoolConfig) -> Self {
-        let semaphore = Semaphore::new(config.max_connections);
+        let semaphore = Arc::new(Semaphore::new(config.max_connections));
         Self {
             config,
             connections: Mutex::new(Vec::new()),
@@ -227,21 +230,25 @@ impl ConnectionPool {
         // Wait for a permit (limits concurrent connections)
         let permit = tokio::time::timeout(
             self.inner.config.acquire_timeout,
-            self.inner.semaphore.acquire(),
+            self.inner.semaphore.clone().acquire_owned(),
         )
         .await
         .map_err(|_| Error::Pool("timeout waiting for connection".to_string()))?
         .map_err(|_| Error::Pool("semaphore closed".to_string()))?;
 
         // Get or create a connection
-        let conn = self.inner.acquire().await?;
-
-        // Forget the permit - it will be released when connection is returned
-        permit.forget();
+        let conn = match self.inner.acquire().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                drop(permit);
+                return Err(err);
+            }
+        };
 
         Ok(PooledConnection {
             connection: Some(conn),
             pool: self.inner.clone(),
+            permit: Some(permit),
         })
     }
 
@@ -258,6 +265,23 @@ impl ConnectionPool {
             ResponsePayload::Query(result) => Ok(result),
             _ => Err(Error::Protocol(ormdb_proto::Error::InvalidMessage(
                 "expected query result".to_string(),
+            ))),
+        })
+    }
+
+    /// Execute an aggregate query.
+    pub async fn aggregate(&self, query: AggregateQuery) -> Result<AggregateResult, Error> {
+        let conn = self.acquire().await?;
+        let request_id = self.inner.next_request_id();
+        let schema_version = self.inner.schema_version();
+
+        let request = Request::aggregate(request_id, schema_version, query);
+        let response = conn.send_request(&request).await?;
+
+        self.handle_response(response, |payload| match payload {
+            ResponsePayload::Aggregate(result) => Ok(result),
+            _ => Err(Error::Protocol(ormdb_proto::Error::InvalidMessage(
+                "expected aggregate result".to_string(),
             ))),
         })
     }
@@ -327,6 +351,81 @@ impl ConnectionPool {
             ResponsePayload::Pong => Ok(()),
             _ => Err(Error::Protocol(ormdb_proto::Error::InvalidMessage(
                 "expected pong response".to_string(),
+            ))),
+        })
+    }
+
+    /// Explain a query plan without executing it.
+    pub async fn explain(&self, query: GraphQuery) -> Result<ExplainResult, Error> {
+        let conn = self.acquire().await?;
+        let request_id = self.inner.next_request_id();
+        let schema_version = self.inner.schema_version();
+
+        let request = Request::explain(request_id, schema_version, query);
+        let response = conn.send_request(&request).await?;
+
+        self.handle_response(response, |payload| match payload {
+            ResponsePayload::Explain(result) => Ok(result),
+            _ => Err(Error::Protocol(ormdb_proto::Error::InvalidMessage(
+                "expected explain result".to_string(),
+            ))),
+        })
+    }
+
+    /// Get server metrics.
+    pub async fn get_metrics(&self) -> Result<MetricsResult, Error> {
+        let conn = self.acquire().await?;
+        let request_id = self.inner.next_request_id();
+
+        let request = Request::get_metrics(request_id);
+        let response = conn.send_request(&request).await?;
+
+        self.handle_response(response, |payload| match payload {
+            ResponsePayload::Metrics(result) => Ok(result),
+            _ => Err(Error::Protocol(ormdb_proto::Error::InvalidMessage(
+                "expected metrics result".to_string(),
+            ))),
+        })
+    }
+
+    /// Get replication status.
+    pub async fn get_replication_status(&self) -> Result<ReplicationStatus, Error> {
+        let conn = self.acquire().await?;
+        let request_id = self.inner.next_request_id();
+
+        let request = Request::get_replication_status(request_id);
+        let response = conn.send_request(&request).await?;
+
+        self.handle_response(response, |payload| match payload {
+            ResponsePayload::ReplicationStatus(status) => Ok(status),
+            _ => Err(Error::Protocol(ormdb_proto::Error::InvalidMessage(
+                "expected replication status".to_string(),
+            ))),
+        })
+    }
+
+    /// Stream changes from the changelog.
+    pub async fn stream_changes(
+        &self,
+        from_lsn: u64,
+        batch_size: u32,
+        entity_filter: Option<Vec<String>>,
+    ) -> Result<StreamChangesResponse, Error> {
+        let conn = self.acquire().await?;
+        let request_id = self.inner.next_request_id();
+
+        let req = StreamChangesRequest {
+            from_lsn,
+            batch_size,
+            entity_filter,
+        };
+        let request = Request::stream_changes(request_id, req);
+        let response = conn.send_request(&request).await?;
+
+        self.handle_response(response, |payload| match payload {
+            ResponsePayload::StreamChanges(response) => Ok(response),
+            _ => Err(Error::Protocol(ormdb_proto::Error::InvalidMessage(
+                "expected stream changes response".to_string(),
             ))),
         })
     }

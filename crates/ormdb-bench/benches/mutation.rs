@@ -25,7 +25,7 @@ fn bench_insert_single(c: &mut Criterion) {
             let id = StorageEngine::generate_id();
             fields[0] = ("id".to_string(), Value::Uuid(id));
 
-            insert_entity(&ctx.storage, "User", fields);
+            black_box(insert_entity(&ctx.storage, "User", fields));
         });
     });
 
@@ -42,7 +42,7 @@ fn bench_insert_single(c: &mut Criterion) {
             fields[0] = ("id".to_string(), Value::Uuid(id));
 
             insert_entity(&ctx.storage, "User", fields);
-            ctx.storage.flush().unwrap();
+            black_box(ctx.storage.flush().unwrap());
         });
     });
 
@@ -59,6 +59,7 @@ fn bench_insert_batch(c: &mut Criterion) {
             BenchmarkId::new("batch", batch_size),
             &batch_size,
             |b, &batch_size| {
+                // Create context outside the measurement loop
                 let ctx = TestContext::with_schema();
 
                 b.iter(|| {
@@ -75,7 +76,7 @@ fn bench_insert_batch(c: &mut Criterion) {
                         txn.put_typed("User", key, Record::new(data));
                     }
 
-                    txn.commit().unwrap();
+                    black_box(txn.commit().unwrap());
                 });
             },
         );

@@ -1,8 +1,9 @@
 //! Request handler for processing client requests.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 use ormdb_core::metrics::SharedMetricsRegistry;
 use ormdb_core::query::{AggregateExecutor, ExplainService};
@@ -15,6 +16,8 @@ use ormdb_proto::{
 use crate::database::Database;
 use crate::error::Error;
 use crate::mutation::MutationExecutor;
+
+const STATS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Handles incoming requests and dispatches to appropriate handlers.
 pub struct RequestHandler {
@@ -103,13 +106,22 @@ impl RequestHandler {
         request_id: u64,
         query: &ormdb_proto::GraphQuery,
     ) -> Result<Response, Error> {
+        if let Err(e) = self
+            .database
+            .refresh_statistics_if_stale(STATS_REFRESH_INTERVAL)
+        {
+            warn!(error = %e, "Failed to refresh statistics");
+        }
+
         let executor = if let Some(metrics) = &self.metrics {
             self.database.executor_with_metrics(metrics.clone())
         } else {
             self.database.executor()
         };
+        let statistics = self.database.statistics();
+        let cache = self.database.plan_cache();
         let result = executor
-            .execute(query)
+            .execute_with_cache(query, cache, Some(statistics))
             .map_err(|e| Error::Database(format!("query execution failed: {}", e)))?;
 
         debug!(entities_returned = result.entities.get(0).map(|e| e.len()).unwrap_or(0), "query completed");
@@ -193,6 +205,13 @@ impl RequestHandler {
         request_id: u64,
         query: &ormdb_proto::GraphQuery,
     ) -> Result<Response, Error> {
+        if let Err(e) = self
+            .database
+            .refresh_statistics_if_stale(STATS_REFRESH_INTERVAL)
+        {
+            warn!(error = %e, "Failed to refresh statistics");
+        }
+
         let catalog = self.database.catalog();
         let statistics = self.database.statistics();
         let cache = self.database.plan_cache();

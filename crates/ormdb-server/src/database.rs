@@ -67,7 +67,7 @@ impl Database {
         let changelog = ChangeLog::open(storage.db())
             .map_err(|e| Error::Database(format!("failed to open changelog: {}", e)))?;
 
-        Ok(Self {
+        let db = Self {
             storage,
             catalog,
             statistics: TableStatistics::new(),
@@ -76,7 +76,13 @@ impl Database {
             changelog,
             _catalog_db: catalog_db,
             retention_policy,
-        })
+        };
+
+        if let Err(e) = db.statistics.refresh(&db.storage, &db.catalog) {
+            warn!(error = %e, "Failed to refresh statistics on startup");
+        }
+
+        Ok(db)
     }
 
     /// Get a reference to the storage engine.
@@ -97,6 +103,15 @@ impl Database {
     /// Get a reference to the table statistics.
     pub fn statistics(&self) -> &TableStatistics {
         &self.statistics
+    }
+
+    /// Refresh statistics if stale, returning true if a refresh ran.
+    pub fn refresh_statistics_if_stale(&self, threshold: Duration) -> Result<bool, Error> {
+        if self.statistics.is_stale(threshold.as_millis() as u64) {
+            self.statistics.refresh(&self.storage, &self.catalog)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Get a reference to the plan cache.
@@ -139,7 +154,13 @@ impl Database {
     /// Run a single compaction cycle manually.
     pub fn compact(&self) -> CompactionResult {
         let engine = CompactionEngine::new(self.storage.clone(), self.retention_policy.clone());
-        engine.compact()
+        let result = engine.compact();
+        if result.did_cleanup() {
+            if let Err(e) = engine.compact_sled() {
+                warn!(error = %e, "Failed to run sled compaction");
+            }
+        }
+        result
     }
 
     /// Create a compaction engine for this database.

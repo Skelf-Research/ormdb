@@ -4,6 +4,9 @@ use super::{BTreeIndex, ColumnarStore, HashIndex, Record, StorageConfig, Version
 use crate::error::Error;
 use crate::query::decode_entity;
 use sled::{Db, Tree};
+use std::collections::{HashMap, HashSet};
+use std::sync::RwLock;
+use ormdb_proto::Value;
 
 /// Tree name for entity data.
 const DATA_TREE: &str = "data";
@@ -39,6 +42,9 @@ pub struct StorageEngine {
 
     /// B-tree index for O(log N) range lookups.
     btree_index: Option<BTreeIndex>,
+
+    /// Tracks which columns have had their B-tree index built this process.
+    btree_indexed_columns: RwLock<HashSet<(String, String)>>,
 }
 
 impl StorageEngine {
@@ -75,6 +81,7 @@ impl StorageEngine {
             columnar,
             hash_index,
             btree_index,
+            btree_indexed_columns: RwLock::new(HashSet::new()),
         })
     }
 
@@ -406,6 +413,246 @@ impl StorageEngine {
     /// Get the B-tree index for O(log N) range lookups, if available.
     pub fn btree_index(&self) -> Option<&BTreeIndex> {
         self.btree_index.as_ref()
+    }
+
+    /// Return the list of B-tree indexed columns for an entity.
+    pub fn btree_indexed_columns_for_entity(&self, entity_type: &str) -> Vec<String> {
+        let guard = match self.btree_indexed_columns.read() {
+            Ok(guard) => guard,
+            Err(_) => return Vec::new(),
+        };
+
+        guard
+            .iter()
+            .filter(|(entity, _)| entity == entity_type)
+            .map(|(_, column)| column.clone())
+            .collect()
+    }
+
+    /// Update hash and B-tree indexes using encoded before/after entity data.
+    ///
+    /// This is intended for write paths that bypass higher-level mutation helpers.
+    pub fn update_secondary_indexes_from_encoded(
+        &self,
+        entity_type: &str,
+        entity_id: [u8; 16],
+        before: Option<&[u8]>,
+        after: Option<&[u8]>,
+        btree_columns: &[String],
+    ) -> Result<(), Error> {
+        let before_fields = match before {
+            Some(data) => match decode_entity(data) {
+                Ok(fields) => Some(fields),
+                Err(_) => return Ok(()),
+            },
+            None => None,
+        };
+        let after_fields = match after {
+            Some(data) => match decode_entity(data) {
+                Ok(fields) => Some(fields),
+                Err(_) => return Ok(()),
+            },
+            None => None,
+        };
+
+        self.update_secondary_indexes_from_fields(
+            entity_type,
+            entity_id,
+            before_fields.as_deref(),
+            after_fields.as_deref(),
+            btree_columns,
+        )?;
+
+        Ok(())
+    }
+
+    /// Update hash and B-tree indexes using decoded before/after fields.
+    ///
+    /// If `after_fields` is None, the columnar row is deleted using `before_fields`.
+    pub fn update_secondary_indexes_from_fields(
+        &self,
+        entity_type: &str,
+        entity_id: [u8; 16],
+        before_fields: Option<&[(String, Value)]>,
+        after_fields: Option<&[(String, Value)]>,
+        btree_columns: &[String],
+    ) -> Result<(), Error> {
+        self.update_hash_indexes_from_fields(entity_type, entity_id, before_fields, after_fields)?;
+        self.update_btree_indexes_from_fields(
+            entity_type,
+            entity_id,
+            before_fields,
+            after_fields,
+            btree_columns,
+        )?;
+
+        if after_fields.is_none() {
+            if let Some(fields) = before_fields {
+                self.delete_columnar_row_from_fields(entity_type, entity_id, fields)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update columnar projection using decoded fields.
+    pub fn update_columnar_row_from_fields(
+        &self,
+        entity_type: &str,
+        entity_id: [u8; 16],
+        fields: &[(String, Value)],
+    ) -> Result<(), Error> {
+        let projection = self.columnar.projection(entity_type)?;
+        projection.update_row(&entity_id, fields)?;
+        Ok(())
+    }
+
+    /// Ensure a B-tree index exists for the given entity/column, building it if missing.
+    ///
+    /// Returns true if the B-tree index is available (and built or already present).
+    pub fn ensure_btree_index(&self, entity_type: &str, column_name: &str) -> Result<bool, Error> {
+        let Some(btree) = self.btree_index.as_ref() else {
+            return Ok(false);
+        };
+
+        let key = (entity_type.to_string(), column_name.to_string());
+        if let Ok(guard) = self.btree_indexed_columns.read() {
+            if guard.contains(&key) {
+                return Ok(true);
+            }
+        }
+
+        let _ = btree.drop_column_index(entity_type, column_name);
+
+        let projection = self.columnar.projection(entity_type)?;
+        let indexed = btree.build_for_column(entity_type, column_name, projection.scan_column(column_name))?;
+
+        tracing::debug!(
+            entity = %entity_type,
+            field = %column_name,
+            indexed,
+            "Built B-tree index"
+        );
+
+        if let Ok(mut guard) = self.btree_indexed_columns.write() {
+            guard.insert(key);
+        }
+
+        Ok(true)
+    }
+
+    fn update_hash_indexes_from_fields(
+        &self,
+        entity_type: &str,
+        entity_id: [u8; 16],
+        before_fields: Option<&[(String, Value)]>,
+        after_fields: Option<&[(String, Value)]>,
+    ) -> Result<(), Error> {
+        let to_map = |fields: Option<&[(String, Value)]>| -> HashMap<String, Value> {
+            fields
+                .unwrap_or(&[])
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+
+        let before_map = to_map(before_fields);
+        let after_map = to_map(after_fields);
+
+        let mut names: HashSet<String> = HashSet::new();
+        names.extend(before_map.keys().cloned());
+        names.extend(after_map.keys().cloned());
+
+        let hash_index = &self.hash_index;
+
+        for name in names {
+            let before_value = before_map.get(&name);
+            let after_value = after_map.get(&name);
+
+            if before_value == after_value {
+                continue;
+            }
+
+            if let Some(value) = before_value {
+                if !matches!(value, Value::Null) {
+                    hash_index.remove(entity_type, &name, value, entity_id)?;
+                }
+            }
+
+            if let Some(value) = after_value {
+                if !matches!(value, Value::Null) {
+                    hash_index.insert(entity_type, &name, value, entity_id)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn update_btree_indexes_from_fields(
+        &self,
+        entity_type: &str,
+        entity_id: [u8; 16],
+        before_fields: Option<&[(String, Value)]>,
+        after_fields: Option<&[(String, Value)]>,
+        btree_columns: &[String],
+    ) -> Result<(), Error> {
+        let Some(btree) = self.btree_index.as_ref() else {
+            return Ok(());
+        };
+
+        if btree_columns.is_empty() {
+            return Ok(());
+        }
+
+        let to_map = |fields: Option<&[(String, Value)]>| -> HashMap<String, Value> {
+            fields
+                .unwrap_or(&[])
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+
+        let before_map = to_map(before_fields);
+        let after_map = to_map(after_fields);
+
+        let mut columns: HashSet<String> = HashSet::new();
+        columns.extend(btree_columns.iter().cloned());
+
+        for column in columns {
+            let before_value = before_map.get(&column);
+            let after_value = after_map.get(&column);
+
+            if before_value == after_value {
+                continue;
+            }
+
+            if let Some(value) = before_value {
+                if !matches!(value, Value::Null) {
+                    btree.remove(entity_type, &column, value, entity_id)?;
+                }
+            }
+
+            if let Some(value) = after_value {
+                if !matches!(value, Value::Null) {
+                    btree.insert(entity_type, &column, value, entity_id)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn delete_columnar_row_from_fields(
+        &self,
+        entity_type: &str,
+        entity_id: [u8; 16],
+        fields: &[(String, Value)],
+    ) -> Result<(), Error> {
+        let projection = self.columnar.projection(entity_type)?;
+        let columns: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
+        projection.delete_row(&entity_id, &columns)?;
+        Ok(())
     }
 }
 

@@ -13,7 +13,11 @@ pub fn routes() -> Router<AppState> {
 /// Health check handler.
 async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     // Try to ping the ORMDB server
-    let ormdb_connected = state.client.ping().await.is_ok();
+    let pool = state.pool.clone();
+    let ormdb_connected = state
+        .execute_write(|| pool.ping())
+        .await
+        .is_ok();
 
     Json(HealthResponse {
         status: if ormdb_connected { "healthy" } else { "degraded" }.to_string(),

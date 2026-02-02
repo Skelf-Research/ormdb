@@ -63,7 +63,8 @@ pub struct RelationSchema {
 async fn handle_get_schema(
     State(state): State<AppState>,
 ) -> Result<Json<SchemaResponse>, AppError> {
-    let (version, _data) = state.client.get_schema().await?;
+    let pool = state.pool.clone();
+    let (version, _data) = state.execute_read(|| pool.get_schema()).await?;
 
     // For now, return an empty schema structure
     // In a full implementation, we would deserialize the schema data

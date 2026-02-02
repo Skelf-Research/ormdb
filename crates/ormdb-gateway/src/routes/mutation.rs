@@ -17,6 +17,7 @@ async fn handle_mutate(
     State(state): State<AppState>,
     Json(mutation): Json<Mutation>,
 ) -> Result<Json<MutationResponse>, AppError> {
-    let result = state.client.mutate(mutation).await?;
+    let pool = state.pool.clone();
+    let result = state.execute_write(|| pool.mutate(mutation.clone())).await?;
     Ok(Json(result.into()))
 }

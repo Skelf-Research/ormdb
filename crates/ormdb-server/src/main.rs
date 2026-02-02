@@ -6,7 +6,7 @@ use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use ormdb_core::metrics::new_shared_registry;
-use ormdb_server::{create_transport, Args, Database, RequestHandler};
+use ormdb_server::{create_transport, Args, CompactionTask, Database, RequestHandler};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,13 +38,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Open the database
     tracing::info!("opening database");
-    let database = Database::open(&config.data_path)?;
+    let database = Arc::new(Database::open(&config.data_path)?);
     let schema_version = database.schema_version();
     tracing::info!(schema_version, "database opened");
 
     // Create request handler
     let metrics = new_shared_registry();
-    let handler = Arc::new(RequestHandler::with_metrics(Arc::new(database), metrics));
+    let handler = Arc::new(RequestHandler::with_metrics(database.clone(), metrics));
+
+    // Start background compaction if enabled
+    let compaction_task = config
+        .compaction_interval
+        .map(|interval| CompactionTask::start(database.clone(), interval));
 
     // Create transport
     let transport = create_transport(&config, handler)?;
@@ -73,6 +78,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::error!(error = %e, "server error");
             return Err(e.into());
         }
+    }
+
+    if let Some(task) = compaction_task {
+        task.join().await;
     }
 
     Ok(())

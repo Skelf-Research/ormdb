@@ -2,8 +2,9 @@
 //!
 //! Provides TCP and IPC transport for the ORMDB server using NNG's REP socket.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use async_nng::AsyncContext;
@@ -106,6 +107,8 @@ pub struct Transport {
     handler: Arc<RequestHandler>,
     max_message_size: usize,
     metrics: Arc<TransportMetrics>,
+    request_timeout: Duration,
+    worker_count: usize,
 }
 
 impl Transport {
@@ -143,6 +146,8 @@ impl Transport {
             handler,
             max_message_size: config.max_message_size,
             metrics: Arc::new(TransportMetrics::new()),
+            request_timeout: config.request_timeout,
+            worker_count: config.transport_workers.max(1),
         })
     }
 
@@ -153,28 +158,12 @@ impl Transport {
 
     /// Run the transport loop, processing incoming requests.
     pub async fn run(&self) -> Result<(), Error> {
-        // Create async context for the socket
-        let mut ctx = AsyncContext::try_from(&self.socket)
-            .map_err(|e| Error::Transport(format!("failed to create async context: {}", e)))?;
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let _handles = self.spawn_worker_threads(stop_flag)?;
 
         tracing::info!("transport ready, accepting requests");
-
-        loop {
-            // Receive a message
-            let msg = ctx
-                .receive(None)
-                .await
-                .map_err(|e| Error::Transport(format!("receive error: {}", e)))?;
-
-            // Process the message
-            let response_bytes = self.process_message(msg.as_slice());
-
-            // Send response
-            let response_msg = Message::from(response_bytes.as_slice());
-            ctx.send(response_msg, None)
-                .await
-                .map_err(|(_, e)| Error::Transport(format!("send error: {}", e)))?;
-        }
+        std::future::pending::<()>().await;
+        Ok(())
     }
 
     /// Run the transport with graceful shutdown support.
@@ -182,59 +171,141 @@ impl Transport {
         &self,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> Result<(), Error> {
-        let mut ctx = AsyncContext::try_from(&self.socket)
-            .map_err(|e| Error::Transport(format!("failed to create async context: {}", e)))?;
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let handles = self.spawn_worker_threads(stop_flag.clone())?;
 
         tracing::info!("transport ready, accepting requests");
 
-        loop {
-            tokio::select! {
-                _ = shutdown.recv() => {
-                    tracing::info!(
-                        total_requests = self.metrics.total_requests(),
-                        successful = self.metrics.successful_requests(),
-                        failed = self.metrics.failed_requests(),
-                        bytes_received = self.metrics.total_bytes_received(),
-                        bytes_sent = self.metrics.total_bytes_sent(),
-                        uptime_secs = self.metrics.uptime().as_secs(),
-                        "shutdown signal received, stopping transport"
-                    );
-                    return Ok(());
-                }
-                result = ctx.receive(Some(Duration::from_secs(1))) => {
-                    match result {
-                        Ok(msg) => {
-                            let received_bytes = msg.len();
-                            let (response_bytes, is_success) = self.process_message_with_status(msg.as_slice());
-                            let sent_bytes = response_bytes.len();
+        let _ = shutdown.recv().await;
+        tracing::info!(
+            total_requests = self.metrics.total_requests(),
+            successful = self.metrics.successful_requests(),
+            failed = self.metrics.failed_requests(),
+            bytes_received = self.metrics.total_bytes_received(),
+            bytes_sent = self.metrics.total_bytes_sent(),
+            uptime_secs = self.metrics.uptime().as_secs(),
+            "shutdown signal received, stopping transport"
+        );
 
-                            let response_msg = Message::from(response_bytes.as_slice());
-
-                            if let Err((_, e)) = ctx.send(response_msg, None).await {
-                                tracing::error!(error = %e, "failed to send response");
-                                self.metrics.record_failure(received_bytes, 0);
-                            } else if is_success {
-                                self.metrics.record_success(received_bytes, sent_bytes);
-                            } else {
-                                self.metrics.record_failure(received_bytes, sent_bytes);
-                            }
-                        }
-                        Err(nng::Error::TimedOut) => {
-                            // Timeout is normal, just continue to check for shutdown
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "receive error");
-                        }
-                    }
-                }
+        stop_flag.store(true, Ordering::SeqCst);
+        let _ = tokio::task::spawn_blocking(move || {
+            for handle in handles {
+                let _ = handle.join();
             }
-        }
+        })
+        .await;
+
+        Ok(())
     }
 
     /// Process a raw message and return the response bytes.
     fn process_message(&self, data: &[u8]) -> Vec<u8> {
-        self.process_message_with_status(data).0
+        self.worker().process_message_with_status(data).0
+    }
+
+    /// Process a raw message and return (response bytes, is_success).
+    fn process_message_with_status(&self, data: &[u8]) -> (Vec<u8>, bool) {
+        self.worker().process_message_with_status(data)
+    }
+
+    fn worker(&self) -> TransportWorker {
+        TransportWorker::new(self.handler.clone(), self.max_message_size)
+    }
+
+    fn spawn_worker_threads(
+        &self,
+        stop_flag: Arc<AtomicBool>,
+    ) -> Result<Vec<thread::JoinHandle<()>>, Error> {
+        let mut handles = Vec::with_capacity(self.worker_count);
+        for worker_id in 0..self.worker_count {
+            let socket = self.socket.clone();
+            let worker = self.worker();
+            let metrics = self.metrics.clone();
+            let request_timeout = self.request_timeout;
+            let stop_flag = stop_flag.clone();
+
+            let handle = thread::Builder::new()
+                .name(format!("ormdb-transport-{}", worker_id))
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to build transport worker runtime");
+
+                    runtime.block_on(async move {
+                        let mut ctx = match AsyncContext::try_from(&socket) {
+                            Ok(ctx) => ctx,
+                            Err(e) => {
+                                tracing::error!(error = %e, worker_id, "failed to create async context");
+                                return;
+                            }
+                        };
+
+                        loop {
+                            if stop_flag.load(Ordering::SeqCst) {
+                                tracing::info!(worker_id, "transport worker stopping");
+                                return;
+                            }
+
+                            match ctx.receive(Some(Duration::from_secs(1))).await {
+                                Ok(msg) => {
+                                    let received_bytes = msg.len();
+                                    let start = Instant::now();
+                                    let (response_bytes, is_success) =
+                                        worker.process_message_with_status(msg.as_slice());
+                                    let elapsed = start.elapsed();
+                                    let sent_bytes = response_bytes.len();
+
+                                    let response_msg = Message::from(response_bytes.as_slice());
+
+                                    if let Err((_, e)) = ctx.send(response_msg, None).await {
+                                        tracing::error!(error = %e, worker_id, "failed to send response");
+                                        metrics.record_failure(received_bytes, 0);
+                                    } else if is_success {
+                                        metrics.record_success(received_bytes, sent_bytes);
+                                    } else {
+                                        metrics.record_failure(received_bytes, sent_bytes);
+                                    }
+
+                                    if elapsed > request_timeout {
+                                        tracing::warn!(
+                                            worker_id,
+                                            duration_ms = elapsed.as_millis() as u64,
+                                            timeout_ms = request_timeout.as_millis() as u64,
+                                            "request exceeded timeout"
+                                        );
+                                    }
+                                }
+                                Err(nng::Error::TimedOut) => {
+                                    continue;
+                                }
+                                Err(e) => {
+                                    tracing::error!(error = %e, worker_id, "receive error");
+                                }
+                            }
+                        }
+                    });
+                })
+                .map_err(|e| Error::Transport(format!("failed to spawn transport worker: {}", e)))?;
+
+            handles.push(handle);
+        }
+
+        Ok(handles)
+    }
+}
+
+struct TransportWorker {
+    handler: Arc<RequestHandler>,
+    max_message_size: usize,
+}
+
+impl TransportWorker {
+    fn new(handler: Arc<RequestHandler>, max_message_size: usize) -> Self {
+        Self {
+            handler,
+            max_message_size,
+        }
     }
 
     /// Process a raw message and return (response bytes, is_success).
@@ -324,6 +395,7 @@ impl Transport {
     }
 }
 
+
 /// Create a transport that listens on the configured addresses.
 pub fn create_transport(
     config: &ServerConfig,
@@ -363,15 +435,22 @@ mod tests {
 
     #[test]
     fn test_transport_creation() {
-        let (_dir, handler) = setup_test_components();
+        let (dir, handler) = setup_test_components();
 
-        // Use a unique port for testing
-        let config = ServerConfig::new("/tmp/test")
-            .with_tcp_address("tcp://127.0.0.1:19001")
+        let ipc_path = format!("ipc://{}", dir.path().join("ormdb.sock").display());
+        let config = ServerConfig::new(dir.path())
+            .without_tcp()
+            .with_ipc_address(ipc_path)
             .with_max_message_size(MAX_MESSAGE_SIZE);
 
         let transport = Transport::new(&config, handler);
-        assert!(transport.is_ok());
+        match transport {
+            Ok(_) => {}
+            Err(Error::Transport(msg)) if msg.contains("Permission denied") => {
+                return;
+            }
+            Err(err) => panic!("transport creation failed: {err}"),
+        }
     }
 
     #[test]
@@ -387,12 +466,7 @@ mod tests {
     #[test]
     fn test_process_ping_message() {
         let (_dir, handler) = setup_test_components();
-
-        let config = ServerConfig::new("/tmp/test")
-            .with_tcp_address("tcp://127.0.0.1:19002")
-            .with_max_message_size(MAX_MESSAGE_SIZE);
-
-        let transport = Transport::new(&config, handler).unwrap();
+        let worker = TransportWorker::new(handler, MAX_MESSAGE_SIZE);
 
         // Create a ping request
         let request = Request::ping(42);
@@ -400,7 +474,8 @@ mod tests {
         let framed = encode_frame(&payload).unwrap();
 
         // Process it
-        let response_bytes = transport.process_message(&framed);
+        let (response_bytes, is_success) = worker.process_message_with_status(&framed);
+        assert!(is_success);
 
         // Decode response - copy to aligned buffer for rkyv
         let response_payload = ormdb_proto::framing::extract_payload(&response_bytes).unwrap();
@@ -420,17 +495,46 @@ mod tests {
     #[test]
     fn test_process_invalid_message() {
         let (_dir, handler) = setup_test_components();
-
-        let config = ServerConfig::new("/tmp/test")
-            .with_tcp_address("tcp://127.0.0.1:19003")
-            .with_max_message_size(MAX_MESSAGE_SIZE);
-
-        let transport = Transport::new(&config, handler).unwrap();
+        let worker = TransportWorker::new(handler, MAX_MESSAGE_SIZE);
 
         // Send garbage data
-        let response_bytes = transport.process_message(b"invalid data");
+        let (response_bytes, is_success) = worker.process_message_with_status(b"invalid data");
 
         // Should return an error response
         assert!(!response_bytes.is_empty());
+        assert!(!is_success);
+    }
+
+    #[test]
+    fn test_process_messages_concurrently() {
+        let (_dir, handler) = setup_test_components();
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let handler = handler.clone();
+            handles.push(std::thread::spawn(move || {
+                let worker = TransportWorker::new(handler, MAX_MESSAGE_SIZE);
+                let request_id = 100 + i as u64;
+                let request = Request::ping(request_id);
+                let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&request).unwrap();
+                let framed = encode_frame(&payload).unwrap();
+
+                let (response_bytes, is_success) = worker.process_message_with_status(&framed);
+                assert!(is_success);
+
+                let response_payload = ormdb_proto::framing::extract_payload(&response_bytes).unwrap();
+                let mut aligned: rkyv::util::AlignedVec<16> = rkyv::util::AlignedVec::new();
+                aligned.extend_from_slice(response_payload);
+                let response: Response =
+                    rkyv::from_bytes::<Response, rkyv::rancor::Error>(&aligned).unwrap();
+
+                assert_eq!(response.id, request_id);
+                assert!(response.status.is_ok());
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
     }
 }

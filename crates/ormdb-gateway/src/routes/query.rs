@@ -17,6 +17,7 @@ async fn handle_query(
     State(state): State<AppState>,
     Json(query): Json<GraphQuery>,
 ) -> Result<Json<QueryResponse>, AppError> {
-    let result = state.client.query(query).await?;
+    let pool = state.pool.clone();
+    let result = state.execute_read(|| pool.query(query.clone())).await?;
     Ok(Json(result.into()))
 }

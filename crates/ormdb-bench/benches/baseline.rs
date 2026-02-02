@@ -16,24 +16,26 @@ fn bench_raw_put(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("raw", size), &size, |b, &size| {
             let (storage, _dir) = setup_raw_storage();
             let data = generate_record_data(size);
-            let record = Record::new(data);
 
             b.iter(|| {
                 let id = ormdb_core::storage::StorageEngine::generate_id();
                 let key = VersionedKey::now(id);
-                storage.put(key, record.clone()).unwrap();
+                // Create record inside iter to avoid measuring clone overhead
+                let record = Record::new(data.clone());
+                black_box(storage.put(key, record).unwrap());
             });
         });
 
         group.bench_with_input(BenchmarkId::new("typed", size), &size, |b, &size| {
             let ctx = TestContext::with_schema();
             let data = generate_record_data(size);
-            let record = Record::new(data);
 
             b.iter(|| {
                 let id = ormdb_core::storage::StorageEngine::generate_id();
                 let key = VersionedKey::now(id);
-                ctx.storage.put_typed("User", key, record.clone()).unwrap();
+                // Create record inside iter to avoid measuring clone overhead
+                let record = Record::new(data.clone());
+                black_box(ctx.storage.put_typed("User", key, record).unwrap());
             });
         });
     }
@@ -143,14 +145,16 @@ fn bench_version_overhead(c: &mut Criterion) {
     let user = &generate_users(1)[0];
     let id = user.id;
 
-    // Insert 10 versions
+    // Insert 10 versions with minimal sleep (just enough for unique timestamps)
     for i in 0..10 {
         let mut fields = user_to_fields(user);
         fields[1] = ("name".to_string(), ormdb_proto::Value::String(format!("Name_v{}", i)));
         let data = encode_entity(&fields).unwrap();
         let key = VersionedKey::now(id);
         ctx.storage.put_typed("User", key, Record::new(data)).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        // Use microseconds instead of milliseconds to reduce setup overhead
+        // while still ensuring unique timestamps
+        std::thread::sleep(std::time::Duration::from_micros(100));
     }
     ctx.storage.flush().unwrap();
 
