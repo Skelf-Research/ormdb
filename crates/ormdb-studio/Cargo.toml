@@ -1,0 +1,61 @@
+[package]
+name = "ormdb-studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Web-based database management studio for ORMDB"
+readme = "README.md"
+keywords = ["database", "orm", "studio", "web-ui", "management"]
+categories = ["database", "web-programming::http-server"]
+
+[[bin]]
+name = "ormdb-studio"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP framework with WebSocket support
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Static asset embedding
+rust-embed = { version = "8", features = ["compression"] }
+mime_guess = "2"
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Internal crates
+ormdb-core.workspace = true
+ormdb-proto.workspace = true
+ormdb-lang.workspace = true
+
+# Storage
+sled.workspace = true
+
+# Session management
+uuid = { version = "1", features = ["v4"] }
+dashmap.workspace = true
+tempfile = "3"
+
+# Utilities
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+anyhow = "1.0"
+
+# Browser opening
+open = "5"
+
+[dev-dependencies]
+axum-test = "16"
