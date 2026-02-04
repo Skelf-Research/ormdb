@@ -11,6 +11,17 @@ description = "Web-based database management studio for ORMDB"
 readme = "README.md"
 keywords = ["database", "orm", "studio", "web-ui", "management"]
 categories = ["database", "web-programming::http-server"]
+include = [
+    "/src/**/*.rs",
+    "/frontend/dist/*",
+    "/frontend/dist/**/*",
+    "/Cargo.toml",
+    "/README.md",
+]
+
+[lib]
+name = "ormdb_studio"
+path = "src/lib.rs"
 
 [[bin]]
 name = "ormdb-studio"

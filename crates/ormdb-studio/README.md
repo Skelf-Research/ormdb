@@ -49,6 +49,40 @@ ormdb-studio --no-open
 
 ## Features
 
+### Terminal Commands
+
+#### Schema Definition
+```bash
+# Define an entity (id: Uuid is added automatically)
+.entity User { name: String, email: String }
+
+# With optional fields (suffix with ?)
+.entity Post { title: String, content: String?, views: Int }
+
+# With array fields (suffix with [])
+.entity Tag { name: String, posts: String[] }
+
+# View current schema
+.schema
+```
+
+**Available Types:**
+- `String` - UTF-8 text
+- `Int` / `Int64` - 32/64-bit integers
+- `Float` / `Float64` - 32/64-bit floating point
+- `Bool` - Boolean
+- `Uuid` - UUID identifier
+- `Timestamp` - Date/time
+- `Bytes` - Binary data
+
+#### Other Commands
+```bash
+.help          # Show all commands
+.schema        # Display current schema
+.session       # Show session info
+.clear         # Clear terminal
+```
+
 ### Query Editor
 - Syntax highlighting for ORMDB query language
 - Auto-completion for entities and fields
@@ -58,7 +92,7 @@ ormdb-studio --no-open
 ### Terminal
 - Full terminal emulator powered by xterm.js
 - Command history and auto-completion
-- Same commands as `ormdb-cli`
+- WebSocket connection for real-time interaction
 
 ### Visual Query Builder
 - Drag entities from schema palette

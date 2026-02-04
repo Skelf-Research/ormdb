@@ -3,6 +3,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use ormdb_core::catalog::FieldType;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -227,33 +228,100 @@ async fn get_schema(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>> {
-    let _session = state
+    let session = state
         .sessions
         .get_session(&session_id)
         .ok_or_else(|| StudioError::SessionNotFound(session_id))?;
 
-    // TODO: Get actual schema from catalog
-    Ok(Json(json!({
-        "success": true,
-        "schema": {
-            "version": 1,
-            "entities": [],
+    let catalog = session.database.catalog();
+    let schema = catalog
+        .current_schema()
+        .map_err(|e| StudioError::Database(e.to_string()))?;
+
+    match schema {
+        Some(bundle) => {
+            let entities: Vec<Value> = bundle
+                .entities
+                .iter()
+                .map(|(name, entity)| {
+                    let fields: Vec<Value> = entity
+                        .fields
+                        .iter()
+                        .map(|f| {
+                            json!({
+                                "name": f.name,
+                                "type": format_field_type(&f.field_type),
+                                "nullable": !f.required,
+                                "primaryKey": f.name == entity.identity_field,
+                            })
+                        })
+                        .collect();
+
+                    json!({
+                        "name": name,
+                        "fields": fields,
+                        "relations": [],
+                    })
+                })
+                .collect();
+
+            Ok(Json(json!({
+                "success": true,
+                "schema": {
+                    "version": bundle.version,
+                    "entities": entities,
+                }
+            })))
         }
-    })))
+        None => Ok(Json(json!({
+            "success": true,
+            "schema": {
+                "version": 0,
+                "entities": [],
+            }
+        }))),
+    }
+}
+
+fn format_field_type(ft: &FieldType) -> String {
+    use ormdb_core::catalog::ScalarType;
+
+    match ft {
+        FieldType::Scalar(s) | FieldType::OptionalScalar(s) => match s {
+            ScalarType::Bool => "Bool".to_string(),
+            ScalarType::Int32 => "Int".to_string(),
+            ScalarType::Int64 => "Int64".to_string(),
+            ScalarType::Float32 => "Float".to_string(),
+            ScalarType::Float64 => "Float64".to_string(),
+            ScalarType::Decimal { precision, scale } => format!("Decimal({},{})", precision, scale),
+            ScalarType::String => "String".to_string(),
+            ScalarType::Bytes => "Bytes".to_string(),
+            ScalarType::Timestamp => "Timestamp".to_string(),
+            ScalarType::Uuid => "Uuid".to_string(),
+        },
+        FieldType::ArrayScalar(s) => format!("{}[]", format_field_type(&FieldType::Scalar(s.clone()))),
+        FieldType::Enum { name, .. } | FieldType::OptionalEnum { name, .. } => name.clone(),
+        FieldType::Embedded { entity } | FieldType::OptionalEmbedded { entity } => entity.clone(),
+        FieldType::ArrayEmbedded { entity } => format!("{}[]", entity),
+    }
 }
 
 async fn list_entities(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>> {
-    let _session = state
+    let session = state
         .sessions
         .get_session(&session_id)
         .ok_or_else(|| StudioError::SessionNotFound(session_id))?;
 
-    // TODO: List actual entities from catalog
+    let catalog = session.database.catalog();
+    let entities = catalog
+        .list_entities()
+        .map_err(|e| StudioError::Database(e.to_string()))?;
+
     Ok(Json(json!({
         "success": true,
-        "entities": []
+        "entities": entities
     })))
 }
