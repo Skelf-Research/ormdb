@@ -15,7 +15,7 @@ categories = ["database", "parsing"]
 [dependencies]
 logos = "0.14"
 thiserror.workspace = true
-ormdb-proto = { path = "../ormdb-proto" }
+ormdb-proto = { version = "0.1.0", path = "../ormdb-proto" }
 
 [dev-dependencies]
 pretty_assertions = "1.4"

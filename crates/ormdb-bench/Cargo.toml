@@ -12,7 +12,7 @@ publish = false
 [dependencies]
 ormdb-core.workspace = true
 ormdb-proto.workspace = true
-ormdb-server = { path = "../ormdb-server" }
+ormdb-server = { version = "0.1.0", path = "../ormdb-server" }
 ormdb-client.workspace = true
 sled.workspace = true
 tempfile = "3"
