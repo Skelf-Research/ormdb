@@ -2,6 +2,15 @@
 name = "ormdb-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Core storage engine, query executor, and catalog for ORMDB"
+readme = "README.md"
+keywords = ["database", "orm", "storage", "query-engine"]
+categories = ["database", "data-structures"]
 
 [dependencies]
 sled.workspace = true

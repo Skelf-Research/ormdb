@@ -3,10 +3,17 @@ name = "ormdb-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "ORMDB Command-Line Client"
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Command-line interface for ORMDB"
+readme = "README.md"
+keywords = ["database", "orm", "cli", "repl"]
+categories = ["command-line-utilities", "database"]
 
 [[bin]]
-name = "ormdb-cli"
+name = "ormdb"
 path = "src/main.rs"
 
 [dependencies]
