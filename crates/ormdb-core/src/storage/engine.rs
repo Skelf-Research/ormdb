@@ -1,11 +1,11 @@
 //! Storage engine implementation.
 
-use super::{BTreeIndex, ColumnarStore, HashIndex, Record, StorageConfig, VersionedKey};
+use super::{BTreeIndex, Changelog, ColumnarStore, HashIndex, Record, StorageConfig, VersionedKey};
 use crate::error::Error;
 use crate::query::decode_entity;
 use sled::{Db, Tree};
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use ormdb_proto::Value;
 
 /// Tree name for entity data.
@@ -144,6 +144,52 @@ impl StorageEngine {
             Some(record) => Ok(Some((version_ts, record))),
             None => Ok(None),
         }
+    }
+
+    /// Batch fetch latest versions for multiple entity IDs.
+    ///
+    /// More efficient than calling `get_latest()` N times as it batches
+    /// the metadata lookups. This is useful for scan operations where
+    /// many entity IDs need to be resolved.
+    ///
+    /// Returns a Vec parallel to the input, with Some((version, record)) for found entities.
+    pub fn get_latest_batch(
+        &self,
+        entity_ids: &[[u8; 16]],
+    ) -> Result<Vec<Option<(u64, Record)>>, Error> {
+        if entity_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 1: Batch fetch version timestamps from meta tree
+        let mut version_map: Vec<Option<u64>> = Vec::with_capacity(entity_ids.len());
+        for entity_id in entity_ids {
+            let latest_key = self.latest_key(entity_id);
+            let version = match self.meta_tree.get(&latest_key)? {
+                Some(bytes) => {
+                    let mut ts_bytes = [0u8; 8];
+                    ts_bytes.copy_from_slice(&bytes);
+                    Some(u64::from_be_bytes(ts_bytes))
+                }
+                None => None,
+            };
+            version_map.push(version);
+        }
+
+        // Phase 2: Batch fetch records from data tree
+        let mut results = Vec::with_capacity(entity_ids.len());
+        for (entity_id, version) in entity_ids.iter().zip(version_map.iter()) {
+            let result = match version {
+                Some(version_ts) => {
+                    self.get(entity_id, *version_ts)?
+                        .map(|record| (*version_ts, record))
+                }
+                None => None,
+            };
+            results.push(result);
+        }
+
+        Ok(results)
     }
 
     /// Get the version of an entity at or before a given timestamp.
@@ -289,6 +335,50 @@ impl StorageEngine {
             })
     }
 
+    /// Batch scan all entities of a given type.
+    ///
+    /// This is more efficient than `scan_entity_type()` when you need all entities,
+    /// as it uses batched version lookups. Uses more memory but fewer round trips.
+    ///
+    /// Returns entities in index order.
+    pub fn scan_entity_type_batch(
+        &self,
+        entity_type: &str,
+    ) -> Result<Vec<([u8; 16], u64, Record)>, Error> {
+        let prefix = self.type_index_prefix(entity_type);
+        let prefix_len = prefix.len();
+
+        // Phase 1: Collect all entity IDs from type index
+        let entity_ids: Vec<[u8; 16]> = self.type_index_tree
+            .scan_prefix(&prefix)
+            .filter_map(|result| match result {
+                Ok((key, _)) => {
+                    if key.len() != prefix_len + 16 {
+                        return None;
+                    }
+                    let mut entity_id = [0u8; 16];
+                    entity_id.copy_from_slice(&key[prefix_len..]);
+                    Some(entity_id)
+                }
+                Err(_) => None,
+            })
+            .collect();
+
+        // Phase 2: Batch fetch latest versions
+        let batch_results = self.get_latest_batch(&entity_ids)?;
+
+        // Phase 3: Combine results, filtering out deleted/missing
+        let results: Vec<([u8; 16], u64, Record)> = entity_ids
+            .into_iter()
+            .zip(batch_results.into_iter())
+            .filter_map(|(entity_id, result)| {
+                result.map(|(version_ts, record)| (entity_id, version_ts, record))
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     /// Get all entity IDs of a given type (including deleted).
     ///
     /// This is useful for getting all IDs without loading the records.
@@ -413,6 +503,52 @@ impl StorageEngine {
     /// Get the B-tree index for O(log N) range lookups, if available.
     pub fn btree_index(&self) -> Option<&BTreeIndex> {
         self.btree_index.as_ref()
+    }
+
+    /// Lookup entity IDs by field value, merging hash index results with changelog pending entries.
+    ///
+    /// This is the preferred method for querying when using async index updates, as it
+    /// ensures recently-written entities are included even if they haven't been indexed yet.
+    ///
+    /// If no changelog is provided, this falls back to a simple hash index lookup.
+    pub fn lookup_with_changelog(
+        &self,
+        entity_type: &str,
+        field: &str,
+        value: &Value,
+        changelog: Option<&Changelog>,
+    ) -> Result<Vec<[u8; 16]>, Error> {
+        // Get committed entity IDs from hash index
+        let mut ids = self.hash_index.lookup(entity_type, field, value)?;
+
+        // Merge with pending changelog entries if available
+        if let Some(cl) = changelog {
+            let pending_ids = cl.pending_ids_for_value(entity_type, field, value);
+            if !pending_ids.is_empty() {
+                // Deduplicate: add only IDs not already in the result
+                let existing: std::collections::HashSet<[u8; 16]> = ids.iter().copied().collect();
+                for id in pending_ids {
+                    if !existing.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+
+        Ok(ids)
+    }
+
+    /// Lookup entity IDs by field value with an Arc<Changelog>.
+    ///
+    /// Convenience method for when the changelog is held in an Arc.
+    pub fn lookup_with_changelog_arc(
+        &self,
+        entity_type: &str,
+        field: &str,
+        value: &Value,
+        changelog: Option<&Arc<Changelog>>,
+    ) -> Result<Vec<[u8; 16]>, Error> {
+        self.lookup_with_changelog(entity_type, field, value, changelog.map(|c| c.as_ref()))
     }
 
     /// Return the list of B-tree indexed columns for an entity.

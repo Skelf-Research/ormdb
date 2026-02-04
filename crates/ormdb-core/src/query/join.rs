@@ -16,10 +16,75 @@ use super::value_codec::{decode_entity, decode_entity_projected};
 use ormdb_proto::{Edge, Value};
 
 /// Internal representation of an entity row during execution.
+///
+/// Supports O(1) field lookups via optional field index (built lazily on demand).
 #[derive(Debug, Clone)]
 pub struct EntityRow {
     pub id: [u8; 16],
     pub fields: Vec<(String, Value)>,
+    /// Lazily-built index mapping field names to their positions in `fields`.
+    /// Built on first call to `ensure_index()` or `get_field()`.
+    field_index: Option<HashMap<String, usize>>,
+}
+
+impl EntityRow {
+    /// Create a new EntityRow without field index.
+    #[inline]
+    pub fn new(id: [u8; 16], fields: Vec<(String, Value)>) -> Self {
+        Self {
+            id,
+            fields,
+            field_index: None,
+        }
+    }
+
+    /// Create a new EntityRow with pre-built field index (for hot paths).
+    #[inline]
+    pub fn with_index(id: [u8; 16], fields: Vec<(String, Value)>) -> Self {
+        let field_index: HashMap<String, usize> = fields
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| (name.clone(), i))
+            .collect();
+        Self {
+            id,
+            fields,
+            field_index: Some(field_index),
+        }
+    }
+
+    /// Build field index for O(1) lookups. Called once, index is reused.
+    #[inline]
+    pub fn ensure_index(&mut self) {
+        if self.field_index.is_none() {
+            let index: HashMap<String, usize> = self
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(i, (name, _))| (name.clone(), i))
+                .collect();
+            self.field_index = Some(index);
+        }
+    }
+
+    /// O(1) field lookup if index exists, O(n) fallback otherwise.
+    #[inline]
+    pub fn get_field(&self, name: &str) -> Option<&Value> {
+        if let Some(ref index) = self.field_index {
+            // O(1) HashMap lookup
+            index.get(name).map(|&i| &self.fields[i].1)
+        } else {
+            // O(n) linear search fallback
+            self.fields.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+        }
+    }
+
+    /// Get field value with mutable access to self (builds index if needed).
+    #[inline]
+    pub fn get_field_indexed(&mut self, name: &str) -> Option<&Value> {
+        self.ensure_index();
+        self.get_field(name)
+    }
 }
 
 /// Join strategy selection for relation resolution.
@@ -101,9 +166,16 @@ impl HashJoinExecutor {
                 _ => continue,
             };
 
+            // Create EntityRow with index for O(1) filter lookups
+            let row = if include.filter.is_some() {
+                EntityRow::with_index(entity_id, fields)
+            } else {
+                EntityRow::new(entity_id, fields)
+            };
+
             // Apply filter early if present (filter pushdown)
             if let Some(filter) = &include.filter {
-                if !FilterEvaluator::evaluate(filter, &fields)? {
+                if !FilterEvaluator::evaluate(filter, &row)? {
                     continue;
                 }
             }
@@ -112,7 +184,7 @@ impl HashJoinExecutor {
             fk_to_entities
                 .entry(fk_id)
                 .or_default()
-                .push(EntityRow { id: entity_id, fields });
+                .push(row);
         }
 
         // Probe phase: lookup each parent ID
@@ -192,14 +264,21 @@ impl NestedLoopExecutor {
             };
 
             if let Some(from_id) = related_source_id {
+                // Create EntityRow with index for O(1) filter lookups
+                let row = if include.filter.is_some() {
+                    EntityRow::with_index(entity_id, fields)
+                } else {
+                    EntityRow::new(entity_id, fields)
+                };
+
                 // Apply include filter if present
                 if let Some(filter) = &include.filter {
-                    if !FilterEvaluator::evaluate(filter, &fields)? {
+                    if !FilterEvaluator::evaluate(filter, &row)? {
                         continue;
                     }
                 }
 
-                rows.push(EntityRow { id: entity_id, fields });
+                rows.push(row);
                 edges.push(Edge::new(from_id, entity_id));
             }
         }

@@ -6,6 +6,10 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+authors = ["Dipankar Sarkar <me@dipankar.name>"]
+repository = "https://github.com/Skelf-Research/ormdb"
+homepage = "https://docs.skelfresearch.com/ormdb"
+documentation = "https://docs.skelfresearch.com/ormdb"
 
 [workspace.dependencies]
 # Core
@@ -21,6 +25,8 @@ tokio = { version = "1", features = ["full"] }
 # Utilities
 thiserror = "2"
 tracing = "0.1"
+dashmap = "6"
+parking_lot = "0.12"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }

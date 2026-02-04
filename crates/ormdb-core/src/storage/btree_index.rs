@@ -323,6 +323,62 @@ impl BTreeIndex {
         self.scan_range(&start_key, &end_key, false)
     }
 
+    /// Scan for all entities where the string column starts with the given prefix.
+    ///
+    /// Uses range scan: `[prefix, prefix_upper_bound)` where upper bound is the
+    /// lexicographically next string after any string starting with prefix.
+    ///
+    /// O(log N + K) where K is the number of matching entities.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Finds all users whose name starts with "Ali" (Alice, Alicia, etc.)
+    /// let ids = btree.scan_prefix("User", "name", "Ali")?;
+    /// ```
+    pub fn scan_prefix(
+        &self,
+        entity_type: &str,
+        column_name: &str,
+        prefix: &str,
+    ) -> Result<Vec<[u8; 16]>, Error> {
+        if prefix.is_empty() {
+            return self.scan_all(entity_type, column_name);
+        }
+
+        // Build upper bound: increment last non-0xFF byte of prefix
+        // "Alice" -> "Alicf", "az" -> "a{", etc.
+        let upper = Self::increment_string_for_range(prefix);
+
+        let low = Value::String(prefix.to_string());
+        let high = Value::String(upper);
+
+        // Scan [low, high) - inclusive low, exclusive high
+        let start_key = Self::build_value_min_key(entity_type, column_name, &low);
+        let end_key = Self::build_value_min_key(entity_type, column_name, &high);
+
+        // Use scan_range_inner with exclude_end=true to get [low, high)
+        self.scan_range_inner(&start_key, &end_key, false, true)
+    }
+
+    /// Increment string for range upper bound.
+    ///
+    /// "abc" -> "abd", "az" -> "a{", handles UTF-8 correctly.
+    /// If all bytes are 0xFF, appends 0xFF to extend range.
+    fn increment_string_for_range(s: &str) -> String {
+        let mut bytes = s.as_bytes().to_vec();
+        // Find rightmost byte that can be incremented without overflow
+        for i in (0..bytes.len()).rev() {
+            if bytes[i] < 0xFF {
+                bytes[i] += 1;
+                return String::from_utf8_lossy(&bytes).into_owned();
+            }
+            // This byte is 0xFF, try next byte to the left
+        }
+        // All bytes are 0xFF - append 0xFF to extend range
+        bytes.push(0xFF);
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
     /// Internal range scan implementation.
     ///
     /// - If exclude_start is true, skip results that match start_key exactly.
@@ -569,5 +625,59 @@ mod tests {
 
         assert!(neg < zero);
         assert!(zero < pos);
+    }
+
+    #[test]
+    fn test_scan_prefix() {
+        let index = test_index();
+
+        let id1 = [1u8; 16];
+        let id2 = [2u8; 16];
+        let id3 = [3u8; 16];
+        let id4 = [4u8; 16];
+        let id5 = [5u8; 16];
+
+        // Insert names: Alice, Alicia, Alfred, Bob, Charlie
+        index.insert("User", "name", &Value::String("Alice".to_string()), id1).unwrap();
+        index.insert("User", "name", &Value::String("Alicia".to_string()), id2).unwrap();
+        index.insert("User", "name", &Value::String("Alfred".to_string()), id3).unwrap();
+        index.insert("User", "name", &Value::String("Bob".to_string()), id4).unwrap();
+        index.insert("User", "name", &Value::String("Charlie".to_string()), id5).unwrap();
+
+        // Prefix "Ali" should match Alice, Alicia
+        let results = index.scan_prefix("User", "name", "Ali").unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.contains(&id1)); // Alice
+        assert!(results.contains(&id2)); // Alicia
+
+        // Prefix "Al" should match Alice, Alicia, Alfred
+        let results = index.scan_prefix("User", "name", "Al").unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results.contains(&id1)); // Alice
+        assert!(results.contains(&id2)); // Alicia
+        assert!(results.contains(&id3)); // Alfred
+
+        // Prefix "B" should match Bob only
+        let results = index.scan_prefix("User", "name", "B").unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results.contains(&id4)); // Bob
+
+        // Prefix "Z" should match nothing
+        let results = index.scan_prefix("User", "name", "Z").unwrap();
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_increment_string_for_range() {
+        // Basic increment
+        assert_eq!(BTreeIndex::increment_string_for_range("abc"), "abd");
+        assert_eq!(BTreeIndex::increment_string_for_range("az"), "a{");
+        assert_eq!(BTreeIndex::increment_string_for_range("Alice"), "Alicf");
+
+        // Single char
+        assert_eq!(BTreeIndex::increment_string_for_range("A"), "B");
+
+        // Unicode strings work correctly (UTF-8 bytes are incremented)
+        assert_eq!(BTreeIndex::increment_string_for_range("café"), "cafê");
     }
 }

@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
 authors = [
-    { name = "ORMDB Team" },
+    { name = "Dipankar Sarkar", email = "me@dipankar.name" },
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -41,9 +41,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ormdb/ormdb"
-Documentation = "https://github.com/ormdb/ormdb"
-Repository = "https://github.com/ormdb/ormdb"
+Homepage = "https://docs.skelfresearch.com/ormdb"
+Documentation = "https://docs.skelfresearch.com/ormdb"
+Repository = "https://github.com/Skelf-Research/ormdb"
 
 [project.entry-points."sqlalchemy.dialects"]
 ormdb = "ormdb.sqlalchemy:OrmdbDialect"

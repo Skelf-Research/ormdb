@@ -61,11 +61,12 @@
     "sequelize",
     "typescript"
   ],
-  "author": "ORMDB Team",
+  "author": "Dipankar Sarkar <me@dipankar.name>",
   "license": "MIT",
+  "homepage": "https://docs.skelfresearch.com/ormdb",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ormdb/ormdb"
+    "url": "https://github.com/Skelf-Research/ormdb"
   },
   "dependencies": {},
   "peerDependencies": {

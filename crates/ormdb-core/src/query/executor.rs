@@ -15,7 +15,7 @@ use crate::storage::StorageEngine;
 
 use super::cache::{PlanCache, QueryFingerprint};
 use super::cost::CostModel;
-use super::filter::{extract_filter_fields, FilterEvaluator};
+use super::filter::{extract_filter_fields, extract_like_prefix, FilterEvaluator};
 use super::join::{execute_join, EntityRow, JoinStrategy};
 use super::planner::{FanoutBudget, IncludePlan, QueryPlan, QueryPlanner};
 use super::statistics::TableStatistics;
@@ -395,6 +395,51 @@ impl<'a> QueryExecutor<'a> {
         Ok((entity_blocks, edge_blocks))
     }
 
+    /// Execute a query and return row-oriented results directly.
+    ///
+    /// This is more efficient than `execute()` for simple queries that don't need
+    /// the columnar EntityBlock format, as it skips the row-to-column transposition.
+    ///
+    /// Use this for:
+    /// - Benchmarks comparing raw query performance
+    /// - Applications that consume data row-by-row
+    /// - When includes are not needed
+    ///
+    /// Returns (rows, has_more) where has_more indicates if pagination truncated results.
+    pub fn execute_rows(&self, query: &GraphQuery) -> Result<(Vec<EntityRow>, bool), Error> {
+        let planner = QueryPlanner::new(self.catalog);
+        let plan = planner.plan_with_budget(query, FanoutBudget::default())?;
+        self.execute_rows_planned(&plan)
+    }
+
+    /// Execute a pre-planned query and return row-oriented results directly.
+    ///
+    /// Skips the row-to-column transposition for better performance when the
+    /// columnar format is not needed.
+    #[instrument(skip(self, plan), fields(entity = %plan.root_entity))]
+    pub fn execute_rows_planned(&self, plan: &QueryPlan) -> Result<(Vec<EntityRow>, bool), Error> {
+        // Fetch and filter root entities
+        let mut rows = self.fetch_entities(plan)?;
+
+        // Check entity budget
+        if rows.len() > plan.budget.max_entities {
+            return Err(Error::InvalidData(format!(
+                "Query would return {} entities, exceeding budget of {}",
+                rows.len(),
+                plan.budget.max_entities
+            )));
+        }
+
+        // Apply sorting
+        self.sort_rows(&mut rows, &plan.order_by);
+
+        // Apply pagination and track has_more
+        let has_more = self.apply_pagination(&mut rows, &plan.pagination);
+
+        debug!(rows_returned = rows.len(), has_more = has_more, "query executed (row-oriented)");
+        Ok((rows, has_more))
+    }
+
     /// Execute a pre-planned query.
     #[instrument(skip(self, plan), fields(entity = %plan.root_entity, includes = plan.includes.len()))]
     pub fn execute_plan(&self, plan: &QueryPlan) -> Result<QueryResult, Error> {
@@ -481,6 +526,19 @@ impl<'a> QueryExecutor<'a> {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Try B-tree index for prefix LIKE patterns (O(log N + K) vs O(N × M) full scan)
+        if let Some(ormdb_proto::FilterExpr::Like { field, pattern }) = &plan.filter {
+            if let Some(prefix) = extract_like_prefix(pattern) {
+                if self.storage.btree_index().is_some() {
+                    if self.storage.ensure_btree_index(&plan.root_entity, field)? {
+                        debug!(path = "btree-prefix", field = %field, prefix = %prefix,
+                               "using B-tree index for LIKE prefix");
+                        return self.fetch_entities_via_btree_prefix(plan, field, prefix);
+                    }
+                }
             }
         }
 
@@ -610,7 +668,7 @@ impl<'a> QueryExecutor<'a> {
                     }
                 }
 
-                EntityRow { id, fields }
+                EntityRow::new(id, fields)
             })
             .collect();
 
@@ -644,12 +702,13 @@ impl<'a> QueryExecutor<'a> {
         for item in projection.scan_columns_iter(&filter_field_names) {
             let (entity_id, fields_map) = item?;
 
-            // Evaluate filter
+            // Evaluate filter using EntityRow with O(1) field lookups
             if let Some(f) = filter {
                 let fields: Vec<(String, Value)> = fields_map.iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                if !FilterEvaluator::evaluate(f, &fields)? {
+                let row = EntityRow::with_index(entity_id, fields);
+                if !FilterEvaluator::evaluate(f, &row)? {
                     continue;
                 }
             }
@@ -743,18 +802,18 @@ impl<'a> QueryExecutor<'a> {
             &matching_ids[..]
         };
 
-        // Fetch entities from row store (1 read per entity, much faster than columnar)
-        // Row store keeps all fields together, so we avoid the N reads per entity overhead
-        let mut rows = Vec::with_capacity(ids_to_fetch.len());
+        // Batch fetch entities from row store (much faster than N individual lookups)
+        let batch_results = self.storage.get_latest_batch(ids_to_fetch)?;
 
-        for &id in ids_to_fetch {
-            if let Some((_version, record)) = self.storage.get_latest(&id)? {
+        let mut rows = Vec::with_capacity(ids_to_fetch.len());
+        for (id, result) in ids_to_fetch.iter().zip(batch_results.into_iter()) {
+            if let Some((_version, record)) = result {
                 let fields = self.decode_record_fields(&record.data, needed_fields.as_ref())?;
-                rows.push(EntityRow { id, fields });
+                rows.push(EntityRow::new(*id, fields));
             }
         }
 
-        debug!(rows_fetched = rows.len(), path = "hash-index-row", "entities fetched via hash index + row store");
+        debug!(rows_fetched = rows.len(), path = "hash-index-batch", "entities fetched via hash index + batch row store");
         Ok(rows)
     }
 
@@ -832,6 +891,28 @@ impl<'a> QueryExecutor<'a> {
         self.fetch_rows_for_ids(plan, &matching_ids)
     }
 
+    /// Fetch entities using B-tree prefix scan for LIKE 'prefix%' patterns.
+    ///
+    /// This is O(log N + K) where K is the number of matching entities:
+    /// 1. B-tree prefix range scan to get matching entity IDs
+    /// 2. Batch fetch entities from row store
+    fn fetch_entities_via_btree_prefix(
+        &self,
+        plan: &QueryPlan,
+        field: &str,
+        prefix: &str,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::BfTree);
+        let btree = self.storage.btree_index().ok_or_else(|| {
+            Error::InvalidData("B-tree index not available".to_string())
+        })?;
+
+        // O(log N + K) prefix scan
+        let matching_ids = btree.scan_prefix(&plan.root_entity, field, prefix)?;
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
     /// Fetch rows from row store for a list of entity IDs.
     ///
     /// Shared helper for index-based lookups (hash and B-tree).
@@ -864,17 +945,18 @@ impl<'a> QueryExecutor<'a> {
             matching_ids
         };
 
-        // Fetch entities from row store (1 read per entity)
-        let mut rows = Vec::with_capacity(ids_to_fetch.len());
+        // Batch fetch entities from row store (more efficient than N individual lookups)
+        let batch_results = self.storage.get_latest_batch(ids_to_fetch)?;
 
-        for &id in ids_to_fetch {
-            if let Some((_version, record)) = self.storage.get_latest(&id)? {
+        let mut rows = Vec::with_capacity(ids_to_fetch.len());
+        for (id, result) in ids_to_fetch.iter().zip(batch_results.into_iter()) {
+            if let Some((_version, record)) = result {
                 let fields = self.decode_record_fields(&record.data, needed_fields.as_ref())?;
-                rows.push(EntityRow { id, fields });
+                rows.push(EntityRow::new(*id, fields));
             }
         }
 
-        debug!(rows_fetched = rows.len(), path = "index-row", "entities fetched via index + row store");
+        debug!(rows_fetched = rows.len(), path = "index-batch", "entities fetched via index + batch row store");
         Ok(rows)
     }
 
@@ -900,17 +982,21 @@ impl<'a> QueryExecutor<'a> {
             // Decode the entity data
             let fields = self.decode_record_fields(&record.data, needed_fields.as_ref())?;
 
+            // Create EntityRow with index for O(1) filter field lookups
+            let row = if plan.filter.is_some() {
+                EntityRow::with_index(entity_id, fields)
+            } else {
+                EntityRow::new(entity_id, fields)
+            };
+
             // Apply filter if present
             if let Some(filter) = &plan.filter {
-                if !FilterEvaluator::evaluate(filter, &fields)? {
+                if !FilterEvaluator::evaluate(filter, &row)? {
                     continue;
                 }
             }
 
-            rows.push(EntityRow {
-                id: entity_id,
-                fields,
-            });
+            rows.push(row);
 
             // Early termination
             if let Some(target) = target_count {
@@ -1224,14 +1310,14 @@ impl<'a> QueryExecutor<'a> {
 
         let needed_fields = self.collect_needed_fields_for_include(include);
 
-        let mut rows = Vec::new();
-        let mut edges = Vec::new();
-
         if use_hash {
             self.record_access_path(AccessPath::HashIndex);
         } else if use_btree {
             self.record_access_path(AccessPath::BfTree);
         }
+
+        // Phase 1: Collect all (parent_id, child_id) pairs via index lookups
+        let mut parent_child_pairs: Vec<([u8; 16], [u8; 16])> = Vec::new();
 
         for &parent_id in source_ids {
             let lookup_value = Value::Uuid(parent_id);
@@ -1246,18 +1332,41 @@ impl<'a> QueryExecutor<'a> {
             };
 
             for child_id in child_ids {
-                if let Some((_version, record)) = self.storage.get_latest(&child_id)? {
-                    let fields = self.decode_record_fields(&record.data, needed_fields.as_ref())?;
+                parent_child_pairs.push((parent_id, child_id));
+            }
+        }
 
-                    if let Some(filter) = &include.filter {
-                        if !FilterEvaluator::evaluate(filter, &fields)? {
-                            continue;
-                        }
+        if parent_child_pairs.is_empty() {
+            return Ok(Some((vec![], vec![])));
+        }
+
+        // Phase 2: Batch fetch all child records (single batch vs N individual lookups)
+        let child_ids: Vec<[u8; 16]> = parent_child_pairs.iter().map(|(_, c)| *c).collect();
+        let batch_results = self.storage.get_latest_batch(&child_ids)?;
+
+        // Phase 3: Process results and apply filters
+        let mut rows = Vec::new();
+        let mut edges = Vec::new();
+
+        for ((parent_id, child_id), result) in parent_child_pairs.into_iter().zip(batch_results.into_iter()) {
+            if let Some((_version, record)) = result {
+                let fields = self.decode_record_fields(&record.data, needed_fields.as_ref())?;
+
+                // Create EntityRow with index for O(1) filter field lookups
+                let row = if include.filter.is_some() {
+                    EntityRow::with_index(child_id, fields)
+                } else {
+                    EntityRow::new(child_id, fields)
+                };
+
+                if let Some(filter) = &include.filter {
+                    if !FilterEvaluator::evaluate(filter, &row)? {
+                        continue;
                     }
-
-                    rows.push(EntityRow { id: child_id, fields });
-                    edges.push(Edge::new(parent_id, child_id));
                 }
+
+                rows.push(row);
+                edges.push(Edge::new(parent_id, child_id));
             }
         }
 
@@ -1665,13 +1774,14 @@ mod tests {
         assert_eq!(columnar2, columnar1);
         assert_eq!(row2, row1);
 
+        // LIKE 'A%' uses B-tree prefix scan
         let query = GraphQuery::new("User")
             .with_filter(ormdb_proto::FilterExpr::like("name", "A%").into());
         executor.execute(&query).unwrap();
         let (hash3, btree3, columnar3, row3) = registry.access_path_counts();
         assert_eq!(hash3, hash2);
-        assert_eq!(btree3, btree2);
-        assert_eq!(columnar3, columnar2 + 1);
+        assert_eq!(btree3, btree2 + 1);  // B-tree prefix scan
+        assert_eq!(columnar3, columnar2);
         assert_eq!(row3, row2);
 
         let query = GraphQuery::new("User");
