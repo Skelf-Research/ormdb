@@ -1,0 +1,114 @@
+version: '3.8'
+
+# Jepsen test cluster for ormdb
+# This creates a 5-node cluster plus a control node for running tests
+
+services:
+  # Control node - runs Jepsen tests
+  control:
+    build:
+      context: .
+      dockerfile: Dockerfile.control
+    container_name: jepsen-control
+    hostname: control
+    volumes:
+      - ./:/jepsen.ormdb
+      - ./store:/jepsen.ormdb/store
+      - ormdb-binaries:/ormdb-binaries
+    networks:
+      - jepsen
+    depends_on:
+      - n1
+      - n2
+      - n3
+      - n4
+      - n5
+    environment:
+      - ORMDB_SERVER_BINARY=/ormdb-binaries/ormdb-server
+      - ORMDB_GATEWAY_BINARY=/ormdb-binaries/ormdb-gateway
+
+  # Database nodes
+  n1:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+    container_name: jepsen-n1
+    hostname: n1
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    networks:
+      - jepsen
+    volumes:
+      - ormdb-binaries:/ormdb-binaries
+
+  n2:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+    container_name: jepsen-n2
+    hostname: n2
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    networks:
+      - jepsen
+    volumes:
+      - ormdb-binaries:/ormdb-binaries
+
+  n3:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+    container_name: jepsen-n3
+    hostname: n3
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    networks:
+      - jepsen
+    volumes:
+      - ormdb-binaries:/ormdb-binaries
+
+  n4:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+    container_name: jepsen-n4
+    hostname: n4
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    networks:
+      - jepsen
+    volumes:
+      - ormdb-binaries:/ormdb-binaries
+
+  n5:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+    container_name: jepsen-n5
+    hostname: n5
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    networks:
+      - jepsen
+    volumes:
+      - ormdb-binaries:/ormdb-binaries
+
+networks:
+  jepsen:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  ormdb-binaries:

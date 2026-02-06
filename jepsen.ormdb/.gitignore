@@ -1,0 +1,29 @@
+# Leiningen
+/target
+/classes
+/checkouts
+pom.xml
+pom.xml.asc
+*.jar
+*.class
+
+# Jepsen results (large files)
+/store
+/results
+
+# IDE
+.idea
+*.iml
+.nrepl-port
+.lein-*
+.hgignore
+.hg/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker

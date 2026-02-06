@@ -50,6 +50,8 @@ pub enum Operation {
     StreamChanges(StreamChangesRequest),
     /// Get replication status.
     GetReplicationStatus,
+    /// Apply a new schema to the database.
+    ApplySchema(Vec<u8>),
 }
 
 /// A subscription request for change notifications.
@@ -173,6 +175,15 @@ impl Request {
             operation: Operation::GetReplicationStatus,
         }
     }
+
+    /// Create an apply schema request.
+    pub fn apply_schema(id: u64, schema_bytes: Vec<u8>) -> Self {
+        Self {
+            id,
+            schema_version: 0,
+            operation: Operation::ApplySchema(schema_bytes),
+        }
+    }
 }
 
 impl Subscription {
@@ -290,6 +301,11 @@ pub enum ResponsePayload {
     StreamChanges(StreamChangesResponse),
     /// Replication status response.
     ReplicationStatus(ReplicationStatus),
+    /// Schema applied successfully.
+    SchemaApplied {
+        /// New schema version after applying.
+        version: u64,
+    },
 }
 
 /// A change event for pub-sub notifications.
@@ -426,6 +442,15 @@ impl Response {
             id,
             status: Status::ok(),
             payload: ResponsePayload::ReplicationStatus(status),
+        }
+    }
+
+    /// Create a successful schema applied response.
+    pub fn schema_applied_ok(id: u64, version: u64) -> Self {
+        Self {
+            id,
+            status: Status::ok(),
+            payload: ResponsePayload::SchemaApplied { version },
         }
     }
 }

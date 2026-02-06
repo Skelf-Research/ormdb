@@ -8,6 +8,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use ormdb_core::metrics::new_shared_registry;
 use ormdb_server::{create_transport, Args, CompactionTask, Database, RequestHandler};
 
+#[cfg(feature = "raft")]
+use ormdb_raft::RaftClusterManager;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
@@ -42,8 +45,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let schema_version = database.schema_version();
     tracing::info!(schema_version, "database opened");
 
+    // Initialize Raft if configured
+    #[cfg(feature = "raft")]
+    let raft_manager = if let Some(ref raft_config) = config.raft_config {
+        tracing::info!(
+            node_id = raft_config.node_id,
+            listen_addr = %raft_config.raft_listen_addr,
+            "initializing Raft cluster mode"
+        );
+
+        let db = Arc::new(database.storage().db().clone());
+        let manager = RaftClusterManager::new(
+            raft_config.clone(),
+            database.storage_arc(),
+            db,
+            None, // apply_fn will be set later when we integrate mutations
+        )
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+        // Initialize cluster if this is the bootstrap node
+        if config.cluster_init && !config.cluster_members.is_empty() {
+            tracing::info!(
+                members = ?config.cluster_members,
+                "initializing Raft cluster"
+            );
+            manager
+                .initialize_cluster(config.cluster_members.clone())
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            tracing::info!("Raft cluster initialized successfully");
+        }
+
+        tracing::info!("Raft cluster manager initialized");
+        Some(Arc::new(manager))
+    } else {
+        None
+    };
+
     // Create request handler
     let metrics = new_shared_registry();
+    #[cfg(feature = "raft")]
+    let handler = if raft_manager.is_some() {
+        Arc::new(RequestHandler::with_metrics_and_raft(
+            database.clone(),
+            metrics,
+            raft_manager.clone(),
+        ))
+    } else {
+        Arc::new(RequestHandler::with_metrics(database.clone(), metrics))
+    };
+    #[cfg(not(feature = "raft"))]
     let handler = Arc::new(RequestHandler::with_metrics(database.clone(), metrics));
 
     // Start background compaction if enabled

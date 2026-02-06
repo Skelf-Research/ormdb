@@ -1,0 +1,34 @@
+# Jepsen database node for ormdb
+FROM debian:bookworm-slim
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    openssh-server \
+    sudo \
+    curl \
+    wget \
+    iptables \
+    iproute2 \
+    ntpdate \
+    procps \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up SSH
+RUN mkdir -p /var/run/sshd && \
+    mkdir -p /root/.ssh && \
+    chmod 700 /root/.ssh && \
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    echo 'root:root' | chpasswd
+
+# Create directories for ormdb
+RUN mkdir -p /opt/ormdb /var/lib/ormdb /var/log/ormdb /etc/ormdb
+
+# Copy authorized keys (will be populated by control node)
+# For development, we'll use password auth
+
+EXPOSE 22 8080 9000 9100 9101 9102 9103 9104
+
+# Start SSH daemon
+CMD ["/usr/sbin/sshd", "-D"]

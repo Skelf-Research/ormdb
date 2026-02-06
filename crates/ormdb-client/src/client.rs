@@ -158,6 +158,25 @@ impl Client {
         })
     }
 
+    /// Apply a new schema to the database.
+    pub async fn apply_schema(&self, schema_bytes: Vec<u8>) -> Result<u64, Error> {
+        let request_id = self.next_request_id();
+
+        let request = Request::apply_schema(request_id, schema_bytes);
+        let response = self.send_request(&request).await?;
+
+        self.handle_response(response, |payload| match payload {
+            ResponsePayload::SchemaApplied { version } => {
+                // Update our cached schema version
+                self.schema_version.store(version, Ordering::SeqCst);
+                Ok(version)
+            }
+            _ => Err(Error::Protocol(ormdb_proto::Error::InvalidMessage(
+                "expected schema applied result".to_string(),
+            ))),
+        })
+    }
+
     /// Ping the server to check connectivity.
     pub async fn ping(&self) -> Result<(), Error> {
         let request_id = self.next_request_id();
