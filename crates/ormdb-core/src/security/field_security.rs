@@ -223,28 +223,53 @@ impl FieldMasker {
         }
     }
 
-    /// Hash a value for audit purposes.
+    /// Hash a value using blake3 cryptographic hash for audit purposes.
+    ///
+    /// Blake3 is a cryptographically secure hash function that is:
+    /// - Collision resistant (unlike djb2)
+    /// - Fast (faster than SHA-256)
+    /// - Suitable for security-sensitive applications
     fn hash_value(value: &Value) -> Value {
-        // Simple hash for now - in production would use a proper hash function
         match value {
             Value::String(s) => {
-                // Simple djb2 hash as hex
-                let mut hash: u64 = 5381;
-                for b in s.bytes() {
-                    hash = hash.wrapping_mul(33).wrapping_add(b as u64);
-                }
-                Value::String(format!("hash:{:016x}", hash))
+                let hash = blake3::hash(s.as_bytes());
+                Value::String(format!("hash:{}", hash.to_hex()))
             }
-            Value::Int32(i) => Value::String(format!("hash:{:08x}", (*i as u32).wrapping_mul(0x9E3779B1))),
-            Value::Int64(i) => Value::String(format!("hash:{:016x}", (*i as u64).wrapping_mul(0x9E3779B97F4A7C15))),
+            Value::Int32(i) => {
+                let hash = blake3::hash(&i.to_le_bytes());
+                Value::String(format!("hash:{}", hash.to_hex()))
+            }
+            Value::Int64(i) => {
+                let hash = blake3::hash(&i.to_le_bytes());
+                Value::String(format!("hash:{}", hash.to_hex()))
+            }
             Value::Bytes(b) => {
-                let mut hash: u64 = 5381;
-                for byte in b {
-                    hash = hash.wrapping_mul(33).wrapping_add(*byte as u64);
-                }
-                Value::String(format!("hash:{:016x}", hash))
+                let hash = blake3::hash(b);
+                Value::String(format!("hash:{}", hash.to_hex()))
             }
-            _ => Value::String("hash:null".to_string()),
+            Value::Float32(f) => {
+                let hash = blake3::hash(&f.to_le_bytes());
+                Value::String(format!("hash:{}", hash.to_hex()))
+            }
+            Value::Float64(f) => {
+                let hash = blake3::hash(&f.to_le_bytes());
+                Value::String(format!("hash:{}", hash.to_hex()))
+            }
+            Value::Bool(b) => {
+                let hash = blake3::hash(&[*b as u8]);
+                Value::String(format!("hash:{}", hash.to_hex()))
+            }
+            Value::Uuid(u) => {
+                let hash = blake3::hash(u);
+                Value::String(format!("hash:{}", hash.to_hex()))
+            }
+            Value::Null => Value::String("hash:null".to_string()),
+            // For other types (Decimal, Timestamp, Date, Time, etc.), convert to string first
+            other => {
+                let s = format!("{:?}", other);
+                let hash = blake3::hash(s.as_bytes());
+                Value::String(format!("hash:{}", hash.to_hex()))
+            }
         }
     }
 }

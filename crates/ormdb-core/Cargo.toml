@@ -24,6 +24,8 @@ serde_json = "1.0.149"
 bf-tree = "0.4"
 dashmap.workspace = true
 parking_lot.workspace = true
+blake3 = "1.5"
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

@@ -5,10 +5,15 @@ use crate::error::ParseError;
 use crate::lexer::{Lexer, SpannedToken, Token};
 use crate::span::{Span, Spanned};
 
+/// Maximum recursion depth to prevent stack overflow attacks.
+const MAX_RECURSION_DEPTH: usize = 100;
+
 /// Parser for the ORMDB query language.
 pub struct Parser<'source> {
     lexer: Lexer<'source>,
     source: &'source str,
+    /// Current recursion depth for stack overflow protection.
+    recursion_depth: usize,
 }
 
 impl<'source> Parser<'source> {
@@ -17,7 +22,26 @@ impl<'source> Parser<'source> {
         Self {
             lexer: Lexer::new(source),
             source,
+            recursion_depth: 0,
         }
+    }
+
+    /// Enter a recursive parsing context.
+    fn enter_recursion(&mut self) -> Result<(), ParseError> {
+        self.recursion_depth += 1;
+        if self.recursion_depth > MAX_RECURSION_DEPTH {
+            Err(ParseError::new(
+                format!("maximum parse depth ({}) exceeded", MAX_RECURSION_DEPTH),
+                Span::new(0, 0),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Exit a recursive parsing context.
+    fn exit_recursion(&mut self) {
+        self.recursion_depth = self.recursion_depth.saturating_sub(1);
     }
 
     /// Parse a complete statement.
@@ -129,6 +153,13 @@ impl<'source> Parser<'source> {
 
     /// Parse OR conditions.
     fn parse_or_condition(&mut self) -> Result<FilterCondition, ParseError> {
+        self.enter_recursion()?;
+        let result = self.parse_or_condition_inner();
+        self.exit_recursion();
+        result
+    }
+
+    fn parse_or_condition_inner(&mut self) -> Result<FilterCondition, ParseError> {
         let mut left = self.parse_and_condition()?;
 
         while let Some(tok) = self.lexer.peek() {

@@ -30,6 +30,11 @@ clap.workspace = true
 thiserror.workspace = true
 sled.workspace = true
 
+# Authentication
+jsonwebtoken.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
 [features]
 default = []
 raft = ["ormdb-raft"]

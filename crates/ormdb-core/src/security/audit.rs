@@ -420,6 +420,141 @@ impl AuditLogger for StderrAuditLogger {
     }
 }
 
+/// File-based audit logger that writes JSON events to a file.
+///
+/// Events are written as newline-delimited JSON (NDJSON) for easy parsing.
+pub struct FileAuditLogger {
+    writer: Mutex<std::io::BufWriter<std::fs::File>>,
+}
+
+impl FileAuditLogger {
+    /// Create a new file audit logger.
+    ///
+    /// Opens the file in append mode, creating it if it doesn't exist.
+    pub fn new(path: impl AsRef<std::path::Path>) -> Result<Self, AuditError> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.as_ref())
+            .map_err(|e| AuditError(format!("failed to open audit log file: {}", e)))?;
+
+        Ok(Self {
+            writer: Mutex::new(std::io::BufWriter::new(file)),
+        })
+    }
+
+    /// Create from environment variable ORMDB_AUDIT_FILE.
+    ///
+    /// Returns None if the environment variable is not set.
+    pub fn from_env() -> Result<Option<Self>, AuditError> {
+        match std::env::var("ORMDB_AUDIT_FILE") {
+            Ok(path) if !path.is_empty() => Ok(Some(Self::new(path)?)),
+            _ => Ok(None),
+        }
+    }
+}
+
+impl std::fmt::Debug for FileAuditLogger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileAuditLogger").finish()
+    }
+}
+
+impl AuditLogger for FileAuditLogger {
+    fn log(&self, event: AuditEvent) {
+        use std::io::Write;
+
+        // Serialize event to JSON
+        let json = serde_json::json!({
+            "id": hex::encode(event.id),
+            "timestamp": event.timestamp,
+            "connection_id": event.connection_id,
+            "client_id": event.client_id,
+            "event": match &event.event_type {
+                AuditEventType::Query { entity, filter_summary, result_count, duration_ms } => {
+                    serde_json::json!({
+                        "type": "query",
+                        "entity": entity,
+                        "filter_summary": filter_summary,
+                        "result_count": result_count,
+                        "duration_ms": duration_ms,
+                    })
+                }
+                AuditEventType::Mutation { entity, operation, entity_ids } => {
+                    serde_json::json!({
+                        "type": "mutation",
+                        "entity": entity,
+                        "operation": operation.to_string(),
+                        "entity_ids": entity_ids.iter().map(hex::encode).collect::<Vec<_>>(),
+                    })
+                }
+                AuditEventType::AccessDenied { operation, entity, reason } => {
+                    serde_json::json!({
+                        "type": "access_denied",
+                        "operation": operation,
+                        "entity": entity,
+                        "reason": reason,
+                    })
+                }
+                AuditEventType::FieldMasked { entity, field, sensitivity } => {
+                    serde_json::json!({
+                        "type": "field_masked",
+                        "entity": entity,
+                        "field": field,
+                        "sensitivity": format!("{:?}", sensitivity),
+                    })
+                }
+                AuditEventType::RlsApplied { entity, policy } => {
+                    serde_json::json!({
+                        "type": "rls_applied",
+                        "entity": entity,
+                        "policy": policy,
+                    })
+                }
+                AuditEventType::Authentication { success, client_id, capabilities_granted, error } => {
+                    serde_json::json!({
+                        "type": "authentication",
+                        "success": success,
+                        "client_id": client_id,
+                        "capabilities_granted": capabilities_granted,
+                        "error": error,
+                    })
+                }
+                AuditEventType::ConnectionOpened { remote_addr } => {
+                    serde_json::json!({
+                        "type": "connection_opened",
+                        "remote_addr": remote_addr,
+                    })
+                }
+                AuditEventType::ConnectionClosed { duration_secs, request_count } => {
+                    serde_json::json!({
+                        "type": "connection_closed",
+                        "duration_secs": duration_secs,
+                        "request_count": request_count,
+                    })
+                }
+            }
+        });
+
+        if let Ok(mut writer) = self.writer.lock() {
+            // Write JSON line
+            if let Err(e) = writeln!(writer, "{}", json) {
+                eprintln!("[AUDIT ERROR] Failed to write audit event: {}", e);
+            }
+        }
+    }
+
+    fn flush(&self) -> Result<(), AuditError> {
+        use std::io::Write;
+
+        self.writer
+            .lock()
+            .map_err(|e| AuditError(format!("failed to lock writer: {}", e)))?
+            .flush()
+            .map_err(|e| AuditError(format!("failed to flush audit log: {}", e)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

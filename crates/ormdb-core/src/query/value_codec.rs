@@ -7,6 +7,10 @@ use crate::error::Error;
 use std::collections::HashSet;
 use ormdb_proto::Value;
 
+/// Maximum number of fields per entity for security hardening.
+/// Prevents malicious payloads with excessive field counts.
+const MAX_FIELD_COUNT: usize = 10_000;
+
 /// Type tag for encoded values.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +104,14 @@ pub fn decode_entity(data: &[u8]) -> Result<Vec<(String, Value)>, Error> {
     let count = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
     cursor += 4;
 
+    // Security check: prevent excessive field counts
+    if count > MAX_FIELD_COUNT {
+        return Err(Error::InvalidData(format!(
+            "field count {} exceeds maximum {}",
+            count, MAX_FIELD_COUNT
+        )));
+    }
+
     let mut fields = Vec::with_capacity(count);
 
     for _ in 0..count {
@@ -146,6 +158,14 @@ pub fn decode_entity_projected(
     }
     let count = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
     cursor += 4;
+
+    // Security check: prevent excessive field counts
+    if count > MAX_FIELD_COUNT {
+        return Err(Error::InvalidData(format!(
+            "field count {} exceeds maximum {}",
+            count, MAX_FIELD_COUNT
+        )));
+    }
 
     let mut fields = Vec::with_capacity(count.min(field_names.len()));
 

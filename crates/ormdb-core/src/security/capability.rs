@@ -315,6 +315,22 @@ impl CapabilityAuthenticator for DenyAllAuthenticator {
     }
 }
 
+/// Development/testing authenticator that grants full admin access.
+///
+/// **WARNING**: This authenticator grants full admin access regardless of
+/// credentials. It should NEVER be used in production.
+#[derive(Debug, Clone, Default)]
+pub struct DevAuthenticator;
+
+impl CapabilityAuthenticator for DevAuthenticator {
+    fn authenticate(&self, _requested: &[String]) -> SecurityResult<CapabilitySet> {
+        // Grant full admin access for development
+        let mut caps = CapabilitySet::new();
+        caps.add(Capability::Admin);
+        Ok(caps)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
