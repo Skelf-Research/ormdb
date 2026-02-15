@@ -216,7 +216,24 @@ HTTP/JSON clients receive error codes:
 | `RESTRICT_VIOLATION` | Delete restricted |
 | `VERSION_CONFLICT` | Optimistic concurrency conflict |
 | `NOT_FOUND` | Entity not found |
-| `BUDGET_EXCEEDED` | Query budget exceeded |
+| `AUTHENTICATION_FAILED` | Invalid credentials or missing authentication |
+| `PERMISSION_DENIED` | Insufficient permissions for operation |
+| `BUDGET_EXCEEDED` | Query budget exceeded (depth, entities, or edges limit) |
+| `SCHEMA_MISMATCH` | Client schema version doesn't match server |
+| `INTERNAL` | Internal server error (details logged server-side) |
+
+### Security Error Codes
+
+Security-related errors provide safe messages to clients while logging details server-side:
+
+| Code | Client Message | Server Log |
+|------|----------------|------------|
+| `AUTHENTICATION_FAILED` | "authentication failed" | Full auth error details |
+| `PERMISSION_DENIED` | "permission denied: [reason]" | Full capability info |
+| `BUDGET_EXCEEDED` | "budget exceeded: [reason]" | Query depth/entity counts |
+| `INTERNAL` | "database operation failed" | Full stack trace |
+
+**Note:** Internal errors are sanitized to prevent information disclosure. Check server logs for detailed error information.
 
 ---
 

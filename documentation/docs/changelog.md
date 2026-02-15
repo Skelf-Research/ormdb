@@ -13,6 +13,38 @@ All notable changes to ORMDB are documented here.
 - Change Data Capture (CDC) streaming
 - Rust, TypeScript, and Python clients
 
+### Security
+
+- **Authentication System**
+  - API Key authentication (`ORMDB_API_KEYS` environment variable)
+  - Bearer token authentication (`ORMDB_TOKENS` environment variable)
+  - JWT authentication with configurable secret/public key
+  - Pluggable authenticator architecture
+
+- **Authorization & Access Control**
+  - Capability-based access control with entity scoping
+  - Fine-grained read/write/delete/admin permissions
+  - Wildcard capabilities (`read:*`, `write:User`)
+  - Row-level security (RLS) policy integration
+
+- **Transport Security**
+  - TLS support for client-server communication
+  - TLS support for Raft cluster communication
+  - Rate limiting to prevent abuse
+  - Connection limiting
+
+- **Security Hardening**
+  - Query budget enforcement (max depth, entities, edges)
+  - Message size limit (4 MB) to prevent DoS
+  - Parser recursion limit (100) to prevent stack overflow
+  - Field count limit (10,000) per entity
+  - Error message sanitization to prevent information disclosure
+
+- **Audit Logging**
+  - File-based audit logger with NDJSON format
+  - Logs authentication, queries, mutations, and access denied events
+  - Environment variable configuration (`ORMDB_AUDIT_FILE`)
+
 ---
 
 ## Version History
