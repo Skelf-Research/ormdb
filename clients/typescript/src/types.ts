@@ -256,6 +256,118 @@ export interface QueryResult<T = EntityRow> {
   hasMore: boolean;
 }
 
+// ============================================================================
+// Search Filter Types
+// ============================================================================
+
+/** Vector similarity search filter using HNSW index */
+export interface VectorSearchFilter {
+  vector_nearest_neighbor: {
+    field: string;
+    query_vector: number[];
+    k: number;
+    max_distance?: number;
+  };
+}
+
+/** Geographic radius search filter */
+export interface GeoRadiusFilter {
+  geo_within_radius: {
+    field: string;
+    center_lat: number;
+    center_lon: number;
+    radius_km: number;
+  };
+}
+
+/** Geographic bounding box search filter */
+export interface GeoBoxFilter {
+  geo_within_box: {
+    field: string;
+    min_lat: number;
+    min_lon: number;
+    max_lat: number;
+    max_lon: number;
+  };
+}
+
+/** Geographic polygon containment search filter */
+export interface GeoPolygonFilter {
+  geo_within_polygon: {
+    field: string;
+    vertices: [number, number][];
+  };
+}
+
+/** Geographic k-nearest neighbor search filter */
+export interface GeoNearestFilter {
+  geo_nearest_neighbor: {
+    field: string;
+    center_lat: number;
+    center_lon: number;
+    k: number;
+  };
+}
+
+/** Full-text BM25 search filter */
+export interface TextMatchFilter {
+  text_match: {
+    field: string;
+    query: string;
+    min_score?: number;
+  };
+}
+
+/** Full-text phrase search filter */
+export interface TextPhraseFilter {
+  text_phrase: {
+    field: string;
+    phrase: string;
+  };
+}
+
+/** Full-text boolean search filter with must/should/must_not terms */
+export interface TextBooleanFilter {
+  text_boolean: {
+    field: string;
+    must: string[];
+    should: string[];
+    must_not: string[];
+  };
+}
+
+/** Union type for all search filters */
+export type SearchFilter =
+  | VectorSearchFilter
+  | GeoRadiusFilter
+  | GeoBoxFilter
+  | GeoPolygonFilter
+  | GeoNearestFilter
+  | TextMatchFilter
+  | TextPhraseFilter
+  | TextBooleanFilter;
+
+/** Search options common to all search methods */
+export interface SearchOptions {
+  fields?: string[];
+  includes?: RelationInclude[];
+  limit?: number;
+}
+
+/** Vector search options */
+export interface VectorSearchOptions extends SearchOptions {
+  maxDistance?: number;
+}
+
+/** Text search options */
+export interface TextSearchOptions extends SearchOptions {
+  minScore?: number;
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
 /** Error codes */
 export type ErrorCode =
   | "CONNECTION_ERROR"

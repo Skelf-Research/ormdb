@@ -1,7 +1,7 @@
 //! Query and mutation execution.
 
+use crate::backend::{Backend, BackendError};
 use crate::formatter::Formatter;
-use ormdb_client::Client;
 use ormdb_lang::{parse_and_compile, CompiledMutation, CompiledSchemaCommand, CompiledStatement};
 use ormdb_proto::{ExplainResult, MetricsResult};
 use thiserror::Error;
@@ -13,9 +13,9 @@ pub enum ExecuteError {
     #[error("{0}")]
     Language(String),
 
-    /// Client communication error.
-    #[error("client error: {0}")]
-    Client(#[from] ormdb_client::Error),
+    /// Backend error.
+    #[error("{0}")]
+    Backend(#[from] BackendError),
 
     /// Not connected to server.
     #[error("not connected to server")]
@@ -24,25 +24,28 @@ pub enum ExecuteError {
 
 /// Execute a statement and return formatted output.
 pub async fn execute(
-    client: &Client,
+    backend: &Backend,
     input: &str,
     formatter: &dyn Formatter,
 ) -> Result<String, ExecuteError> {
     // Parse and compile the input
-    let compiled = parse_and_compile(input).map_err(|e| ExecuteError::Language(e.format_with_source(input)))?;
+    let compiled =
+        parse_and_compile(input).map_err(|e| ExecuteError::Language(e.format_with_source(input)))?;
 
     match compiled {
         CompiledStatement::Query(query) => {
-            let result = client.query(query).await?;
+            let result = backend.query(query).await?;
             Ok(formatter.format_query_result(&result))
         }
         CompiledStatement::Aggregate(query) => {
-            let result = client.aggregate(query).await?;
+            let result = backend.aggregate(query).await?;
             Ok(format_aggregate_result(&result))
         }
-        CompiledStatement::Mutation(mutation) => execute_mutation(client, mutation, formatter).await,
+        CompiledStatement::Mutation(mutation) => {
+            execute_mutation(backend, mutation, formatter).await
+        }
         CompiledStatement::SchemaCommand(cmd) => {
-            execute_schema_command(client, cmd, formatter).await
+            execute_schema_command(backend, cmd, formatter).await
         }
     }
 }
@@ -62,8 +65,17 @@ fn format_aggregate_result(result: &ormdb_proto::AggregateResult) -> String {
             ormdb_proto::AggregateFunction::Max => "MAX",
         };
 
-        let field_part = value.field.as_ref().map(|f| format!("({})", f)).unwrap_or_else(|| "".to_string());
-        lines.push(format!("{}{}: {}", func_name, field_part, format_value(&value.value)));
+        let field_part = value
+            .field
+            .as_ref()
+            .map(|f| format!("({})", f))
+            .unwrap_or_else(|| "".to_string());
+        lines.push(format!(
+            "{}{}: {}",
+            func_name,
+            field_part,
+            format_value(&value.value)
+        ));
     }
 
     lines.join("\n")
@@ -100,21 +112,25 @@ fn format_uuid(bytes: &[u8; 16]) -> String {
 
 /// Execute a mutation.
 async fn execute_mutation(
-    client: &Client,
+    backend: &Backend,
     mutation: CompiledMutation,
     formatter: &dyn Formatter,
 ) -> Result<String, ExecuteError> {
     match mutation {
         CompiledMutation::Insert(m) => {
-            let result = client.mutate(m).await?;
+            let result = backend.mutate(m).await?;
             let message = if !result.inserted_ids.is_empty() {
                 format!("inserted {} record(s)", result.inserted_ids.len())
             } else {
                 String::new()
             };
-            Ok(formatter.format_mutation_result(result.affected as usize, &message))
+            Ok(formatter.format_mutation_result(result.affected, &message))
         }
-        CompiledMutation::UpdateWithFilter { entity, filter: _, data } => {
+        CompiledMutation::UpdateWithFilter {
+            entity,
+            filter: _,
+            data,
+        } => {
             // For now, we need to build a query to find matching entities,
             // then update each one. This is a simplified implementation.
             // In a full implementation, the server would support filter-based mutations.
@@ -134,38 +150,45 @@ async fn execute_mutation(
                 entity
             )))
         }
-        CompiledMutation::UpsertWithFilter { entity, filter: _, data } => {
-            Ok(formatter.format_message(&format!(
-                "Upsert {} with {} fields (filter-based upserts require server support)",
-                entity,
-                data.len()
-            )))
-        }
+        CompiledMutation::UpsertWithFilter {
+            entity,
+            filter: _,
+            data,
+        } => Ok(formatter.format_message(&format!(
+            "Upsert {} with {} fields (filter-based upserts require server support)",
+            entity,
+            data.len()
+        ))),
     }
 }
 
 /// Execute a schema command.
 async fn execute_schema_command(
-    client: &Client,
+    backend: &Backend,
     cmd: CompiledSchemaCommand,
     formatter: &dyn Formatter,
 ) -> Result<String, ExecuteError> {
     match cmd {
         CompiledSchemaCommand::ListEntities => {
-            let (_version, schema_bytes) = client.get_schema().await?;
+            let (version, schema_bytes) = backend.get_schema().await?;
             // For now, we'll just report the schema version
             // A full implementation would deserialize the schema and list entities
-            Ok(formatter.format_message(&format!(
-                "Schema loaded ({} bytes). Entity listing requires schema deserialization.",
-                schema_bytes.len()
-            )))
+            if schema_bytes.is_empty() {
+                Ok(formatter.format_message(&format!(
+                    "Schema version {} (embedded mode - use db.schema() to define entities)",
+                    version
+                )))
+            } else {
+                Ok(formatter.format_message(&format!(
+                    "Schema loaded ({} bytes). Entity listing requires schema deserialization.",
+                    schema_bytes.len()
+                )))
+            }
         }
-        CompiledSchemaCommand::DescribeEntity(entity) => {
-            Ok(formatter.format_message(&format!(
-                "Describe entity '{}' (requires schema deserialization)",
-                entity
-            )))
-        }
+        CompiledSchemaCommand::DescribeEntity(entity) => Ok(formatter.format_message(&format!(
+            "Describe entity '{}' (requires schema deserialization)",
+            entity
+        ))),
         CompiledSchemaCommand::DescribeRelation(relation) => {
             Ok(formatter.format_message(&format!(
                 "Describe relation '{}' (requires schema deserialization)",
@@ -177,14 +200,14 @@ async fn execute_schema_command(
 }
 
 /// Execute an EXPLAIN command for a query.
-pub async fn explain(client: &Client, input: &str) -> Result<ExplainResult, ExecuteError> {
+pub async fn explain(backend: &Backend, input: &str) -> Result<ExplainResult, ExecuteError> {
     // Parse and compile the input
     let compiled =
         parse_and_compile(input).map_err(|e| ExecuteError::Language(e.format_with_source(input)))?;
 
     match compiled {
         CompiledStatement::Query(query) => {
-            let result = client.explain(query).await?;
+            let result = backend.explain(query).await?;
             Ok(result)
         }
         _ => Err(ExecuteError::Language(
@@ -194,8 +217,8 @@ pub async fn explain(client: &Client, input: &str) -> Result<ExplainResult, Exec
 }
 
 /// Get server metrics.
-pub async fn get_metrics(client: &Client) -> Result<MetricsResult, ExecuteError> {
-    let result = client.get_metrics().await?;
+pub async fn get_metrics(backend: &Backend) -> Result<MetricsResult, ExecuteError> {
+    let result = backend.get_metrics().await?;
     Ok(result)
 }
 
@@ -236,7 +259,10 @@ pub fn format_metrics(result: &MetricsResult) -> String {
     if !result.queries.by_entity.is_empty() {
         lines.push("  By Entity:".to_string());
         for entity_count in &result.queries.by_entity {
-            lines.push(format!("    {}: {}", entity_count.entity, entity_count.count));
+            lines.push(format!(
+                "    {}: {}",
+                entity_count.entity, entity_count.count
+            ));
         }
     }
     lines.push(String::new());
@@ -265,7 +291,10 @@ pub fn format_metrics(result: &MetricsResult) -> String {
 
     // Storage metrics
     lines.push("Storage:".to_string());
-    lines.push(format!("  Total Entities: {}", result.storage.total_entities));
+    lines.push(format!(
+        "  Total Entities: {}",
+        result.storage.total_entities
+    ));
     if !result.storage.entity_counts.is_empty() {
         lines.push("  By Type:".to_string());
         for ec in &result.storage.entity_counts {
@@ -323,13 +352,15 @@ cond1 || cond2          Logical OR
 
 REPL COMMANDS
 -------------
-.connect <address>      Connect to server
+.connect <address>      Connect to server (client mode)
 .disconnect             Disconnect from server
 .status                 Show connection status
 .schema                 List all entities
 .schema <Entity>        Describe entity
 .format table|json|csv  Set output format
 .history                Show query history
+.flush                  Flush to disk (embedded mode)
+.compact                Run compaction (embedded mode)
 .clear                  Clear screen
 .help                   Show this help
 .exit / .quit           Exit REPL

@@ -15,7 +15,7 @@ categories = ["database", "data-structures"]
 [dependencies]
 sled.workspace = true
 rkyv.workspace = true
-mimalloc = { workspace = true, optional = true }
+mimalloc.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 ormdb-proto.workspace = true
@@ -26,10 +26,10 @@ dashmap.workspace = true
 parking_lot.workspace = true
 blake3 = "1.5"
 hex = "0.4"
+rand.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
 
 [features]
-default = ["mimalloc"]
-mimalloc = ["dep:mimalloc"]
+default = []

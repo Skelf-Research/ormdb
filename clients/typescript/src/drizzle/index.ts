@@ -179,11 +179,27 @@ export interface SQL {
 
 /** Comparison result for where clauses */
 export interface Condition {
-  type: "comparison" | "and" | "or" | "not";
+  type: "comparison" | "and" | "or" | "not" | "search";
   field?: string;
   op?: string;
   value?: unknown;
   conditions?: Condition[];
+  searchFilter?: SearchConditionData;
+}
+
+/** Search condition data */
+export interface SearchConditionData {
+  searchType:
+    | "vector_nearest_neighbor"
+    | "geo_within_radius"
+    | "geo_within_box"
+    | "geo_within_polygon"
+    | "geo_nearest_neighbor"
+    | "text_match"
+    | "text_phrase"
+    | "text_boolean";
+  field: string;
+  params: Record<string, unknown>;
 }
 
 // Comparison operators
@@ -258,6 +274,197 @@ export function desc(column: Column): { column: Column; direction: "desc" } {
 }
 
 // ============================================================================
+// Search Operators
+// ============================================================================
+
+/**
+ * Vector similarity search using HNSW index.
+ *
+ * @example
+ * ```typescript
+ * const results = await db
+ *   .select()
+ *   .from(products)
+ *   .where(vectorSearch(products.embedding, [0.1, 0.2, ...], 10));
+ * ```
+ */
+export function vectorSearch(
+  column: Column<number[]>,
+  queryVector: number[],
+  k: number,
+  maxDistance?: number
+): Condition {
+  return {
+    type: "search",
+    searchFilter: {
+      searchType: "vector_nearest_neighbor",
+      field: column.name,
+      params: { query_vector: queryVector, k, max_distance: maxDistance },
+    },
+  };
+}
+
+/**
+ * Geographic radius search.
+ *
+ * @example
+ * ```typescript
+ * const results = await db
+ *   .select()
+ *   .from(restaurants)
+ *   .where(geoWithinRadius(restaurants.location, 37.7749, -122.4194, 5.0));
+ * ```
+ */
+export function geoWithinRadius(
+  column: Column,
+  centerLat: number,
+  centerLon: number,
+  radiusKm: number
+): Condition {
+  return {
+    type: "search",
+    searchFilter: {
+      searchType: "geo_within_radius",
+      field: column.name,
+      params: { center_lat: centerLat, center_lon: centerLon, radius_km: radiusKm },
+    },
+  };
+}
+
+/**
+ * Geographic bounding box search.
+ */
+export function geoWithinBox(
+  column: Column,
+  minLat: number,
+  minLon: number,
+  maxLat: number,
+  maxLon: number
+): Condition {
+  return {
+    type: "search",
+    searchFilter: {
+      searchType: "geo_within_box",
+      field: column.name,
+      params: { min_lat: minLat, min_lon: minLon, max_lat: maxLat, max_lon: maxLon },
+    },
+  };
+}
+
+/**
+ * Geographic polygon search.
+ */
+export function geoWithinPolygon(
+  column: Column,
+  vertices: [number, number][]
+): Condition {
+  return {
+    type: "search",
+    searchFilter: {
+      searchType: "geo_within_polygon",
+      field: column.name,
+      params: { vertices },
+    },
+  };
+}
+
+/**
+ * Geographic k-nearest neighbor search.
+ */
+export function geoNearest(
+  column: Column,
+  centerLat: number,
+  centerLon: number,
+  k: number
+): Condition {
+  return {
+    type: "search",
+    searchFilter: {
+      searchType: "geo_nearest_neighbor",
+      field: column.name,
+      params: { center_lat: centerLat, center_lon: centerLon, k },
+    },
+  };
+}
+
+/**
+ * Full-text search with BM25 scoring.
+ *
+ * @example
+ * ```typescript
+ * const results = await db
+ *   .select()
+ *   .from(articles)
+ *   .where(textMatch(articles.content, "rust programming", 0.5));
+ * ```
+ */
+export function textMatch(
+  column: Column<string>,
+  query: string,
+  minScore?: number
+): Condition {
+  return {
+    type: "search",
+    searchFilter: {
+      searchType: "text_match",
+      field: column.name,
+      params: { query, min_score: minScore },
+    },
+  };
+}
+
+/**
+ * Full-text phrase search.
+ */
+export function textPhrase(column: Column<string>, phrase: string): Condition {
+  return {
+    type: "search",
+    searchFilter: {
+      searchType: "text_phrase",
+      field: column.name,
+      params: { phrase },
+    },
+  };
+}
+
+/**
+ * Full-text boolean search with must/should/must_not terms.
+ *
+ * @example
+ * ```typescript
+ * const results = await db
+ *   .select()
+ *   .from(articles)
+ *   .where(textBoolean(articles.content, {
+ *     must: ["rust"],
+ *     should: ["performance", "safety"],
+ *     mustNot: ["deprecated"],
+ *   }));
+ * ```
+ */
+export function textBoolean(
+  column: Column<string>,
+  terms: {
+    must?: string[];
+    should?: string[];
+    mustNot?: string[];
+  }
+): Condition {
+  return {
+    type: "search",
+    searchFilter: {
+      searchType: "text_boolean",
+      field: column.name,
+      params: {
+        must: terms.must ?? [],
+        should: terms.should ?? [],
+        must_not: terms.mustNot ?? [],
+      },
+    },
+  };
+}
+
+// ============================================================================
 // Query Builders
 // ============================================================================
 
@@ -276,6 +483,15 @@ function conditionToFilter(condition: Condition): FilterExpr {
       return { or: condition.conditions!.map(conditionToFilter) };
     case "not":
       return { not: conditionToFilter(condition.conditions![0]) };
+    case "search": {
+      const sf = condition.searchFilter!;
+      return {
+        [sf.searchType]: {
+          field: sf.field,
+          ...sf.params,
+        },
+      } as unknown as FilterExpr;
+    }
   }
 }
 

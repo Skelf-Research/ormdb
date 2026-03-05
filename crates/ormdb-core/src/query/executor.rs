@@ -590,6 +590,66 @@ impl<'a> QueryExecutor<'a> {
             }
         }
 
+        // Try vector index for nearest neighbor search
+        if let Some(ormdb_proto::FilterExpr::VectorNearestNeighbor { field, query_vector, k, max_distance }) = &plan.filter {
+            if let Some(vi) = self.storage.vector_index() {
+                debug!(path = "vector-index", field = %field, k = %k, "using vector index for nearest neighbor search");
+                return self.fetch_entities_via_vector_index(plan, vi, field, query_vector, *k as usize, *max_distance);
+            }
+        }
+
+        // Try geo index for spatial queries
+        match &plan.filter {
+            Some(ormdb_proto::FilterExpr::GeoWithinRadius { field, center_lat, center_lon, radius_km }) => {
+                if let Some(gi) = self.storage.geo_index() {
+                    debug!(path = "geo-index", field = %field, radius_km = %radius_km, "using geo index for radius search");
+                    return self.fetch_entities_via_geo_radius(plan, gi, field, *center_lat, *center_lon, *radius_km);
+                }
+            }
+            Some(ormdb_proto::FilterExpr::GeoWithinBox { field, min_lat, min_lon, max_lat, max_lon }) => {
+                if let Some(gi) = self.storage.geo_index() {
+                    debug!(path = "geo-index", field = %field, "using geo index for bounding box search");
+                    return self.fetch_entities_via_geo_box(plan, gi, field, *min_lat, *min_lon, *max_lat, *max_lon);
+                }
+            }
+            Some(ormdb_proto::FilterExpr::GeoWithinPolygon { field, vertices }) => {
+                if let Some(gi) = self.storage.geo_index() {
+                    debug!(path = "geo-index", field = %field, "using geo index for polygon containment");
+                    return self.fetch_entities_via_geo_polygon(plan, gi, field, vertices);
+                }
+            }
+            Some(ormdb_proto::FilterExpr::GeoNearestNeighbor { field, center_lat, center_lon, k }) => {
+                if let Some(gi) = self.storage.geo_index() {
+                    debug!(path = "geo-index", field = %field, k = %k, "using geo index for nearest neighbor");
+                    return self.fetch_entities_via_geo_nearest(plan, gi, field, *center_lat, *center_lon, *k as usize);
+                }
+            }
+            _ => {}
+        }
+
+        // Try full-text index for text search
+        match &plan.filter {
+            Some(ormdb_proto::FilterExpr::TextMatch { field, query, min_score }) => {
+                if let Some(fti) = self.storage.fulltext_index() {
+                    debug!(path = "fulltext-index", field = %field, "using fulltext index for text match");
+                    return self.fetch_entities_via_fulltext_match(plan, fti, field, query, min_score.map(|s| s as f64));
+                }
+            }
+            Some(ormdb_proto::FilterExpr::TextPhrase { field, phrase }) => {
+                if let Some(fti) = self.storage.fulltext_index() {
+                    debug!(path = "fulltext-index", field = %field, "using fulltext index for phrase search");
+                    return self.fetch_entities_via_fulltext_phrase(plan, fti, field, phrase);
+                }
+            }
+            Some(ormdb_proto::FilterExpr::TextBoolean { field, must, should, must_not }) => {
+                if let Some(fti) = self.storage.fulltext_index() {
+                    debug!(path = "fulltext-index", field = %field, "using fulltext index for boolean search");
+                    return self.fetch_entities_via_fulltext_boolean(plan, fti, field, must, should, must_not);
+                }
+            }
+            _ => {}
+        }
+
         // Use columnar path for filtered queries - more efficient due to:
         // 1. Two-phase streaming filter with early termination
         // 2. Only needed columns are read
@@ -957,6 +1017,162 @@ impl<'a> QueryExecutor<'a> {
 
         // O(log N + K) prefix scan
         let matching_ids = btree.scan_prefix(&plan.root_entity, field, prefix)?;
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
+    /// Fetch entities using vector index for nearest neighbor search (HNSW).
+    fn fetch_entities_via_vector_index(
+        &self,
+        plan: &QueryPlan,
+        vi: &crate::storage::VectorIndex,
+        field: &str,
+        query_vector: &[f32],
+        k: usize,
+        max_distance: Option<f32>,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::VectorIndex);
+
+        // HNSW search returns (entity_id, distance) pairs
+        let results = vi.search(&plan.root_entity, field, query_vector, k)?;
+
+        // Filter by max_distance if specified
+        let matching_ids: Vec<[u8; 16]> = results
+            .into_iter()
+            .filter(|(_, dist)| max_distance.map_or(true, |max| *dist <= max))
+            .map(|(id, _)| id)
+            .collect();
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
+    /// Fetch entities using geo index for radius search.
+    fn fetch_entities_via_geo_radius(
+        &self,
+        plan: &QueryPlan,
+        gi: &crate::storage::GeoIndex,
+        field: &str,
+        center_lat: f64,
+        center_lon: f64,
+        radius_km: f64,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::GeoIndex);
+        let center = crate::storage::GeoPoint { lat: center_lat, lon: center_lon };
+
+        // R-tree radius search returns (entity_id, distance) pairs
+        let results = gi.within_radius(&plan.root_entity, field, center, radius_km)?;
+        let matching_ids: Vec<[u8; 16]> = results.into_iter().map(|(id, _)| id).collect();
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
+    /// Fetch entities using geo index for bounding box search.
+    fn fetch_entities_via_geo_box(
+        &self,
+        plan: &QueryPlan,
+        gi: &crate::storage::GeoIndex,
+        field: &str,
+        min_lat: f64,
+        min_lon: f64,
+        max_lat: f64,
+        max_lon: f64,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::GeoIndex);
+        let bbox = crate::storage::MBR { min_lat, min_lon, max_lat, max_lon };
+
+        let matching_ids = gi.within_box(&plan.root_entity, field, bbox)?;
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
+    /// Fetch entities using geo index for polygon containment.
+    fn fetch_entities_via_geo_polygon(
+        &self,
+        plan: &QueryPlan,
+        gi: &crate::storage::GeoIndex,
+        field: &str,
+        vertices: &[(f64, f64)],
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::GeoIndex);
+
+        let matching_ids = gi.within_polygon(&plan.root_entity, field, vertices)?;
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
+    /// Fetch entities using geo index for nearest neighbor search.
+    fn fetch_entities_via_geo_nearest(
+        &self,
+        plan: &QueryPlan,
+        gi: &crate::storage::GeoIndex,
+        field: &str,
+        center_lat: f64,
+        center_lon: f64,
+        k: usize,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::GeoIndex);
+        let center = crate::storage::GeoPoint { lat: center_lat, lon: center_lon };
+
+        let results = gi.nearest(&plan.root_entity, field, center, k)?;
+        let matching_ids: Vec<[u8; 16]> = results.into_iter().map(|(id, _)| id).collect();
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
+    /// Fetch entities using fulltext index for text match search.
+    fn fetch_entities_via_fulltext_match(
+        &self,
+        plan: &QueryPlan,
+        fti: &crate::storage::FullTextIndex,
+        field: &str,
+        query: &str,
+        min_score: Option<f64>,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::FulltextIndex);
+
+        // Apply pagination limit if available
+        let limit = plan.pagination.as_ref().map_or(1000, |p| (p.offset + p.limit) as usize);
+
+        let results = fti.search_with_min_score(&plan.root_entity, field, query, limit, min_score)?;
+        let matching_ids: Vec<[u8; 16]> = results.into_iter().map(|r| r.entity_id).collect();
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
+    /// Fetch entities using fulltext index for phrase search.
+    fn fetch_entities_via_fulltext_phrase(
+        &self,
+        plan: &QueryPlan,
+        fti: &crate::storage::FullTextIndex,
+        field: &str,
+        phrase: &str,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::FulltextIndex);
+
+        let limit = plan.pagination.as_ref().map_or(1000, |p| (p.offset + p.limit) as usize);
+
+        let results = fti.search_phrase(&plan.root_entity, field, phrase, limit)?;
+        let matching_ids: Vec<[u8; 16]> = results.into_iter().map(|r| r.entity_id).collect();
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
+    /// Fetch entities using fulltext index for boolean search.
+    fn fetch_entities_via_fulltext_boolean(
+        &self,
+        plan: &QueryPlan,
+        fti: &crate::storage::FullTextIndex,
+        field: &str,
+        must: &[String],
+        should: &[String],
+        must_not: &[String],
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::FulltextIndex);
+
+        let limit = plan.pagination.as_ref().map_or(1000, |p| (p.offset + p.limit) as usize);
+
+        let results = fti.search_boolean(&plan.root_entity, field, must, should, must_not, limit)?;
+        let matching_ids: Vec<[u8; 16]> = results.into_iter().map(|r| r.entity_id).collect();
 
         self.fetch_rows_for_ids(plan, &matching_ids)
     }

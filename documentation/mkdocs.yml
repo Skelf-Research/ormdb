@@ -82,11 +82,13 @@ nav:
     - Transactions: tutorials/transactions.md
   - Guides:
     - guides/index.md
+    - Embedded Mode: guides/embedded-mode.md
     - Schema Migrations: guides/schema-migrations.md
     - Security: guides/security.md
     - Performance: guides/performance.md
     - Pagination: guides/pagination.md
     - Aggregations: guides/aggregations.md
+    - Search: guides/search.md
     - Change Data Capture: guides/cdc.md
   - ORM Adapters:
     - adapters/index.md

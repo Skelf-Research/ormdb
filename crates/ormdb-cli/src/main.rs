@@ -1,26 +1,50 @@
-//! ORMDB Command-Line Client
+//! ORMDB Command-Line Interface
 //!
-//! An interactive CLI for querying and managing ORMDB databases.
+//! A unified CLI for ORMDB that supports both embedded and client modes.
+//!
+//! # Usage
+//!
+//! ```bash
+//! # Embedded mode (local database file)
+//! ormdb ./my_data                      # Open local database
+//! ormdb :memory:                       # In-memory database
+//! ormdb ./my_data -c "User.findMany()" # Command mode
+//!
+//! # Client mode (remote server)
+//! ormdb tcp://localhost:9000           # Connect to server
+//! ormdb ipc:///tmp/ormdb.sock          # Connect via IPC
+//! ```
 
+mod backend;
 mod commands;
 mod completer;
 mod executor;
 mod formatter;
+mod mode;
 mod repl;
 
 use clap::Parser;
 use formatter::OutputFormat;
+use mode::ConnectionMode;
 use std::path::PathBuf;
-use std::time::Duration;
 
-/// ORMDB Command-Line Client
+/// ORMDB Command-Line Interface
 #[derive(Parser, Debug)]
-#[command(name = "ormdb-cli")]
-#[command(version, about = "ORMDB Command-Line Client")]
+#[command(name = "ormdb")]
+#[command(version, about = "ORMDB Command-Line Interface - Embedded & Client")]
 pub struct Args {
-    /// Server address (tcp:// or ipc://)
-    #[arg(short = 'H', long, default_value = "tcp://127.0.0.1:9000")]
-    pub host: String,
+    /// Database path or server URL
+    ///
+    /// - File path (./data, /path/to/db): Open in embedded mode
+    /// - :memory: : Open in-memory embedded database
+    /// - tcp://host:port: Connect to server
+    /// - ipc:///path: Connect via IPC
+    #[arg(default_value = ":memory:")]
+    pub target: String,
+
+    /// Legacy: Server address (deprecated, use positional argument)
+    #[arg(short = 'H', long, hide = true)]
+    pub host: Option<String>,
 
     /// Execute a single query and exit
     #[arg(short = 'c', long)]
@@ -34,13 +58,21 @@ pub struct Args {
     #[arg(long, default_value = "table", value_enum)]
     pub format: OutputFormat,
 
-    /// Connection timeout in seconds
+    /// Connection timeout in seconds (client mode only)
     #[arg(long, default_value_t = 30)]
     pub timeout: u64,
 
-    /// Maximum message size in MB
+    /// Maximum message size in MB (client mode only)
     #[arg(long, default_value_t = 64)]
     pub max_message_mb: usize,
+}
+
+impl Args {
+    /// Get the effective target, considering the legacy --host flag.
+    fn effective_target(&self) -> &str {
+        // Legacy: -H flag takes precedence if provided
+        self.host.as_deref().unwrap_or(&self.target)
+    }
 }
 
 #[tokio::main]
@@ -64,38 +96,53 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    let config = ormdb_client::ClientConfig::new(&args.host)
-        .with_timeout(Duration::from_secs(args.timeout))
-        .with_max_message_size(args.max_message_mb * 1024 * 1024);
+    let target = args.effective_target();
+    let mode = ConnectionMode::detect(target);
+
+    // Print mode info
+    match &mode {
+        ConnectionMode::Embedded { path: None } => {
+            tracing::info!("Opening in-memory database");
+        }
+        ConnectionMode::Embedded { path: Some(p) } => {
+            tracing::info!("Opening embedded database: {}", p.display());
+        }
+        ConnectionMode::Client { url } => {
+            tracing::info!("Connecting to server: {}", url);
+        }
+    }
 
     // Determine which mode to run in
     if let Some(command) = &args.command {
         // Command mode: execute single query and exit
-        run_command_mode(&config, command, args.format).await
+        run_command_mode(&mode, command, args.format, args.timeout).await
     } else if let Some(file) = &args.file {
         // Script mode: execute queries from file
-        run_script_mode(&config, file, args.format).await
+        run_script_mode(&mode, file, args.format, args.timeout).await
     } else {
         // REPL mode: interactive shell
-        run_repl_mode(config, args.format).await
+        run_repl_mode(mode, args.format, args.timeout).await
     }
 }
 
 /// Execute a single command and exit.
 async fn run_command_mode(
-    config: &ormdb_client::ClientConfig,
+    mode: &ConnectionMode,
     command: &str,
     format: OutputFormat,
+    timeout: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = ormdb_client::Client::connect(config.clone()).await?;
+    let backend = backend::create_backend(mode.clone(), timeout).await?;
     let formatter = formatter::create_formatter(format);
 
-    match executor::execute(&client, command, &*formatter).await {
+    match executor::execute(&backend, command, &*formatter).await {
         Ok(output) => {
             println!("{}", output);
+            backend.close().await?;
             Ok(())
         }
         Err(e) => {
+            backend.close().await?;
             eprintln!("{}", e);
             std::process::exit(1);
         }
@@ -104,12 +151,13 @@ async fn run_command_mode(
 
 /// Execute queries from a file.
 async fn run_script_mode(
-    config: &ormdb_client::ClientConfig,
+    mode: &ConnectionMode,
     file: &PathBuf,
     format: OutputFormat,
+    timeout: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(file)?;
-    let client = ormdb_client::Client::connect(config.clone()).await?;
+    let backend = backend::create_backend(mode.clone(), timeout).await?;
     let formatter = formatter::create_formatter(format);
 
     // Split by lines, filter empty lines and comments
@@ -120,7 +168,7 @@ async fn run_script_mode(
         .collect();
 
     for statement in statements {
-        match executor::execute(&client, statement, &*formatter).await {
+        match executor::execute(&backend, statement, &*formatter).await {
             Ok(output) => {
                 if !output.is_empty() {
                     println!("{}", output);
@@ -133,13 +181,15 @@ async fn run_script_mode(
         }
     }
 
+    backend.close().await?;
     Ok(())
 }
 
 /// Run the interactive REPL.
 async fn run_repl_mode(
-    config: ormdb_client::ClientConfig,
+    mode: ConnectionMode,
     format: OutputFormat,
+    timeout: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    repl::run(config, format).await
+    repl::run(mode, format, timeout).await
 }

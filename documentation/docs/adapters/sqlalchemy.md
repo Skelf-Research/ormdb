@@ -375,6 +375,77 @@ async with AsyncSession(engine) as session:
 
 ---
 
+## Search Features
+
+ORMDB provides specialized search expressions for vector, geographic, and full-text search.
+
+### Vector Search
+
+```python
+from ormdb.sqlalchemy import vector_search
+
+# Find similar products by embedding
+stmt = select(Product).where(
+    vector_search(Product.embedding, query_vector, k=10, max_distance=0.5)
+)
+results = session.execute(stmt).scalars().all()
+```
+
+### Geographic Search
+
+```python
+from ormdb.sqlalchemy import geo_within_radius, geo_within_box, geo_within_polygon, geo_nearest
+
+# Radius search
+stmt = select(Restaurant).where(
+    geo_within_radius(Restaurant.location, 37.7749, -122.4194, 5.0)
+)
+
+# Bounding box search
+stmt = select(Restaurant).where(
+    geo_within_box(Restaurant.location, 37.7, -122.5, 37.85, -122.35)
+)
+
+# Polygon search
+vertices = [(37.7, -122.5), (37.8, -122.5), (37.85, -122.4)]
+stmt = select(Restaurant).where(
+    geo_within_polygon(Restaurant.location, vertices)
+)
+
+# k-nearest
+stmt = select(Restaurant).where(
+    geo_nearest(Restaurant.location, 37.7749, -122.4194, k=10)
+)
+```
+
+### Full-Text Search
+
+```python
+from ormdb.sqlalchemy import text_match, text_phrase, text_boolean
+
+# BM25 text search
+stmt = select(Article).where(
+    text_match(Article.content, "rust programming", min_score=0.5)
+)
+
+# Phrase search
+stmt = select(Article).where(
+    text_phrase(Article.content, "quick brown fox")
+)
+
+# Boolean search
+stmt = select(Article).where(
+    text_boolean(
+        Article.content,
+        must=["rust"],
+        should=["performance", "safety"],
+        must_not=["deprecated"],
+    )
+)
+```
+
+---
+
 ## ORMDB-Specific Features
 
 ### Access Native Client

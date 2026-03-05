@@ -46,6 +46,17 @@ pub enum Value {
     StringArray(Vec<String>),
     /// Array of UUIDs.
     UuidArray(Vec<[u8; 16]>),
+    /// Vector of 32-bit floats for similarity search.
+    Vector(Vec<f32>),
+    /// Geographic point as (latitude, longitude).
+    GeoPoint {
+        /// Latitude in degrees (-90 to 90).
+        lat: f64,
+        /// Longitude in degrees (-180 to 180).
+        lon: f64,
+    },
+    /// Geographic polygon as list of (lat, lon) vertices.
+    GeoPolygon(Vec<(f64, f64)>),
 }
 
 impl Value {
@@ -141,6 +152,40 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Try to get as vector reference.
+    pub fn as_vector(&self) -> Option<&[f32]> {
+        match self {
+            Value::Vector(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Try to get as geo point (lat, lon).
+    pub fn as_geo_point(&self) -> Option<(f64, f64)> {
+        match self {
+            Value::GeoPoint { lat, lon } => Some((*lat, *lon)),
+            _ => None,
+        }
+    }
+
+    /// Try to get as geo polygon vertices.
+    pub fn as_geo_polygon(&self) -> Option<&[(f64, f64)]> {
+        match self {
+            Value::GeoPolygon(vertices) => Some(vertices),
+            _ => None,
+        }
+    }
+
+    /// Check if this value is a vector type.
+    pub fn is_vector(&self) -> bool {
+        matches!(self, Value::Vector(_))
+    }
+
+    /// Check if this value is a geo type.
+    pub fn is_geo(&self) -> bool {
+        matches!(self, Value::GeoPoint { .. } | Value::GeoPolygon(_))
+    }
 }
 
 // Conversion implementations
@@ -222,6 +267,18 @@ impl From<Vec<String>> for Value {
     }
 }
 
+impl From<Vec<f32>> for Value {
+    fn from(v: Vec<f32>) -> Self {
+        Value::Vector(v)
+    }
+}
+
+impl From<Vec<f64>> for Value {
+    fn from(v: Vec<f64>) -> Self {
+        Value::Float64Array(v)
+    }
+}
+
 impl<T: Into<Value>> From<Option<T>> for Value {
     fn from(v: Option<T>) -> Self {
         match v {
@@ -278,6 +335,44 @@ mod tests {
     }
 
     #[test]
+    fn test_vector_values() {
+        let v: Value = vec![1.0f32, 2.0, 3.0].into();
+        assert!(v.is_vector());
+        assert!(!v.is_array()); // Vector is not counted as array
+        assert_eq!(v.as_vector(), Some(&[1.0f32, 2.0, 3.0][..]));
+
+        // Vector from Value::Vector directly
+        let v = Value::Vector(vec![0.5, 0.25, 0.125]);
+        assert!(v.is_vector());
+        assert_eq!(v.as_vector().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_geo_point_values() {
+        let v = Value::GeoPoint {
+            lat: 37.7749,
+            lon: -122.4194,
+        };
+        assert!(v.is_geo());
+        assert!(!v.is_null());
+        assert_eq!(v.as_geo_point(), Some((37.7749, -122.4194)));
+    }
+
+    #[test]
+    fn test_geo_polygon_values() {
+        let vertices = vec![
+            (37.0, -122.0),
+            (38.0, -122.0),
+            (38.0, -121.0),
+            (37.0, -121.0),
+            (37.0, -122.0), // Closed polygon
+        ];
+        let v = Value::GeoPolygon(vertices.clone());
+        assert!(v.is_geo());
+        assert_eq!(v.as_geo_polygon(), Some(&vertices[..]));
+    }
+
+    #[test]
     fn test_value_serialization_roundtrip() {
         let values = vec![
             Value::Null,
@@ -292,6 +387,18 @@ mod tests {
             Value::Uuid([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
             Value::Int32Array(vec![1, 2, 3]),
             Value::StringArray(vec!["a".into(), "b".into()]),
+            // New search-related types
+            Value::Vector(vec![0.1, 0.2, 0.3, 0.4]),
+            Value::GeoPoint {
+                lat: 37.7749,
+                lon: -122.4194,
+            },
+            Value::GeoPolygon(vec![
+                (37.0, -122.0),
+                (38.0, -122.0),
+                (38.0, -121.0),
+                (37.0, -121.0),
+            ]),
         ];
 
         for value in values {

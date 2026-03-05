@@ -79,6 +79,91 @@ for (const user of result.entities) {
 }
 ```
 
+### Search Methods
+
+The client provides specialized methods for vector, geographic, and full-text search.
+
+#### Vector Search
+
+Find similar items using HNSW k-nearest neighbor search:
+
+```typescript
+// Find 10 most similar products
+const similar = await client.vectorSearch(
+  "Product",
+  "embedding",
+  [0.1, 0.2, 0.3, ...],  // query vector
+  10,                     // k nearest neighbors
+  { maxDistance: 0.5 }    // optional threshold
+);
+```
+
+#### Geographic Search
+
+Find entities by location:
+
+```typescript
+// Radius search
+const nearby = await client.geoSearch(
+  "Restaurant",
+  "location",
+  37.7749,   // latitude
+  -122.4194, // longitude
+  5.0        // radius in km
+);
+
+// Bounding box search
+const inBox = await client.geoBoxSearch(
+  "Restaurant",
+  "location",
+  37.7, -122.5,   // min lat/lon
+  37.85, -122.35  // max lat/lon
+);
+
+// k-nearest
+const closest = await client.geoNearest(
+  "Restaurant",
+  "location",
+  37.7749,
+  -122.4194,
+  10  // k nearest
+);
+```
+
+#### Full-Text Search
+
+Search text content with BM25 ranking:
+
+```typescript
+// Basic text search
+const articles = await client.textSearch(
+  "Article",
+  "content",
+  "rust programming",
+  { minScore: 0.5 }
+);
+
+// Phrase search
+const exact = await client.textPhraseSearch(
+  "Article",
+  "content",
+  "quick brown fox"
+);
+
+// Boolean search
+const advanced = await client.textBooleanSearch(
+  "Article",
+  "content",
+  {
+    must: ["rust"],
+    should: ["performance", "safety"],
+    mustNot: ["deprecated"],
+  }
+);
+```
+
+For more details, see the **[Search Guide](../guides/search.md)**.
+
 ## Prisma Adapter
 
 Use familiar Prisma-style API:

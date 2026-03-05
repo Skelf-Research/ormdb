@@ -145,6 +145,18 @@ OrmdbClient(base_url: str = "http://localhost:8080", timeout: float = 30.0)
 - `get_replication_status()` - Get replication status
 - `stream_changes(from_lsn=0, limit=1000, entities=None)` - Stream change log entries
 
+#### Search Methods
+
+- `vector_search(entity, field, query_vector, k, ...)` - Vector similarity search
+- `geo_search(entity, field, lat, lon, radius_km, ...)` - Geographic radius search
+- `geo_box_search(entity, field, min_lat, min_lon, max_lat, max_lon, ...)` - Bounding box search
+- `geo_polygon_search(entity, field, vertices, ...)` - Polygon containment search
+- `geo_nearest(entity, field, lat, lon, k, ...)` - k-nearest geographic search
+- `text_search(entity, field, query, ...)` - Full-text BM25 search
+- `text_phrase_search(entity, field, phrase, ...)` - Exact phrase search
+- `text_boolean_search(entity, field, must, should, must_not, ...)` - Boolean text search
+- `search(entity, filter, ...)` - Generic search with SearchFilter
+
 ### Filters
 
 Filters use the following format:
@@ -177,6 +189,40 @@ Filters use the following format:
         {"field": "status", "op": "eq", "value": "pending"}
     ]
 }
+```
+
+### Search Filters
+
+```python
+# Vector similarity search
+similar = client.vector_search(
+    "Product", "embedding",
+    query_vector=[0.1, 0.2, 0.3],
+    k=10, max_distance=0.5
+)
+
+# Geographic radius search
+nearby = client.geo_search(
+    "Restaurant", "location",
+    center_lat=37.7749, center_lon=-122.4194,
+    radius_km=5.0
+)
+
+# Full-text search
+articles = client.text_search(
+    "Article", "content",
+    "rust programming",
+    min_score=0.5
+)
+
+# Boolean text search
+from ormdb.types import TextBooleanFilter
+results = client.search("Article", TextBooleanFilter(
+    field="content",
+    must=["rust"],
+    should=["performance"],
+    must_not=["deprecated"]
+))
 ```
 
 ### Includes (Relations)

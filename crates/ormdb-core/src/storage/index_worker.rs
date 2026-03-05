@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 
-use super::{BTreeIndex, Changelog, ChangelogEntry, ColumnarStore, HashIndex, MutationType};
+use super::{
+    BTreeIndex, Changelog, ChangelogEntry, ColumnarStore, FullTextIndex, GeoIndex, GeoPoint,
+    HashIndex, MutationType, VectorIndex,
+};
 use crate::error::Error;
 use ormdb_proto::Value;
 
@@ -62,6 +65,34 @@ impl IndexWorker {
         btree_columns: Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>,
         config: IndexWorkerConfig,
     ) -> Self {
+        Self::start_with_search_indexes(
+            changelog,
+            hash_index,
+            btree_index,
+            columnar,
+            btree_columns,
+            None,
+            None,
+            None,
+            config,
+        )
+    }
+
+    /// Start a new background index worker with support for search indexes.
+    ///
+    /// The worker will continuously poll the changelog and apply entries to all indexes
+    /// including vector, geo, and full-text indexes.
+    pub fn start_with_search_indexes(
+        changelog: Arc<Changelog>,
+        hash_index: Arc<HashIndex>,
+        btree_index: Option<Arc<BTreeIndex>>,
+        columnar: Arc<ColumnarStore>,
+        btree_columns: Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>,
+        vector_index: Option<Arc<VectorIndex>>,
+        geo_index: Option<Arc<GeoIndex>>,
+        fulltext_index: Option<Arc<FullTextIndex>>,
+        config: IndexWorkerConfig,
+    ) -> Self {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = shutdown.clone();
 
@@ -72,6 +103,9 @@ impl IndexWorker {
                 btree_index,
                 columnar,
                 btree_columns,
+                vector_index,
+                geo_index,
+                fulltext_index,
                 config,
                 shutdown_clone,
             );
@@ -103,6 +137,9 @@ impl IndexWorker {
         btree_index: Option<Arc<BTreeIndex>>,
         columnar: Arc<ColumnarStore>,
         btree_columns: Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>,
+        vector_index: Option<Arc<VectorIndex>>,
+        geo_index: Option<Arc<GeoIndex>>,
+        fulltext_index: Option<Arc<FullTextIndex>>,
         config: IndexWorkerConfig,
         shutdown: Arc<AtomicBool>,
     ) {
@@ -117,6 +154,9 @@ impl IndexWorker {
                     btree_index.as_deref(),
                     &columnar,
                     &btree_columns,
+                    vector_index.as_deref(),
+                    geo_index.as_deref(),
+                    fulltext_index.as_deref(),
                     config.batch_size,
                 );
                 break;
@@ -138,6 +178,9 @@ impl IndexWorker {
                     btree_index.as_deref(),
                     &columnar,
                     &btree_columns,
+                    vector_index.as_deref(),
+                    geo_index.as_deref(),
+                    fulltext_index.as_deref(),
                 ) {
                     tracing::error!(
                         seq = entry.seq,
@@ -164,6 +207,9 @@ impl IndexWorker {
         btree_index: Option<&BTreeIndex>,
         columnar: &ColumnarStore,
         btree_columns: &Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>,
+        vector_index: Option<&VectorIndex>,
+        geo_index: Option<&GeoIndex>,
+        fulltext_index: Option<&FullTextIndex>,
         batch_size: usize,
     ) {
         loop {
@@ -174,7 +220,16 @@ impl IndexWorker {
 
             let mut last_seq = 0;
             for entry in entries {
-                let _ = Self::process_entry(&entry, hash_index, btree_index, columnar, btree_columns);
+                let _ = Self::process_entry(
+                    &entry,
+                    hash_index,
+                    btree_index,
+                    columnar,
+                    btree_columns,
+                    vector_index,
+                    geo_index,
+                    fulltext_index,
+                );
                 last_seq = entry.seq;
             }
 
@@ -191,6 +246,9 @@ impl IndexWorker {
         btree_index: Option<&BTreeIndex>,
         columnar: &ColumnarStore,
         btree_columns: &Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>,
+        vector_index: Option<&VectorIndex>,
+        geo_index: Option<&GeoIndex>,
+        fulltext_index: Option<&FullTextIndex>,
     ) -> Result<(), Error> {
         let entity_type = &entry.entity_type;
         let entity_id = entry.entity_id;
@@ -223,6 +281,17 @@ impl IndexWorker {
 
                 // Update columnar store
                 Self::update_columnar(columnar, entity_type, entity_id, after)?;
+
+                // Update search indexes
+                Self::update_search_indexes(
+                    entity_type,
+                    entity_id,
+                    before.as_deref(),
+                    after,
+                    vector_index,
+                    geo_index,
+                    fulltext_index,
+                )?;
             }
             MutationType::Delete { before } => {
                 // Remove from hash index
@@ -248,6 +317,16 @@ impl IndexWorker {
 
                 // Remove from columnar store
                 Self::delete_columnar(columnar, entity_type, entity_id, before)?;
+
+                // Remove from search indexes
+                Self::remove_from_search_indexes(
+                    entity_type,
+                    entity_id,
+                    before,
+                    vector_index,
+                    geo_index,
+                    fulltext_index,
+                )?;
             }
         }
 
@@ -369,6 +448,110 @@ impl IndexWorker {
         let projection = columnar.projection(entity_type)?;
         let columns: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
         projection.delete_row(&entity_id, &columns)?;
+        Ok(())
+    }
+
+    /// Update search indexes (vector, geo, full-text) for an upsert.
+    fn update_search_indexes(
+        entity_type: &str,
+        entity_id: [u8; 16],
+        before: Option<&[(String, Value)]>,
+        after: &[(String, Value)],
+        vector_index: Option<&VectorIndex>,
+        geo_index: Option<&GeoIndex>,
+        fulltext_index: Option<&FullTextIndex>,
+    ) -> Result<(), Error> {
+        use std::collections::HashMap;
+
+        let to_map = |fields: &[(String, Value)]| -> HashMap<String, Value> {
+            fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+
+        let before_map = before.map(to_map).unwrap_or_default();
+        let after_map = to_map(after);
+
+        // Process each field in after
+        for (field_name, after_value) in &after_map {
+            let before_value = before_map.get(field_name);
+
+            // Skip if value unchanged
+            if before_value == Some(after_value) {
+                continue;
+            }
+
+            // Handle vector values
+            if let Value::Vector(vec) = after_value {
+                if let Some(vi) = vector_index {
+                    // Remove old vector if present
+                    if before_value.is_some() {
+                        let _ = vi.remove(entity_type, field_name, entity_id);
+                    }
+                    // Insert new vector
+                    vi.insert(entity_type, field_name, entity_id, vec)?;
+                }
+            }
+
+            // Handle geo point values
+            if let Value::GeoPoint { lat, lon } = after_value {
+                if let Some(gi) = geo_index {
+                    // Remove old point if present
+                    if before_value.is_some() {
+                        let _ = gi.remove(entity_type, field_name, entity_id);
+                    }
+                    // Insert new point
+                    gi.insert(entity_type, field_name, entity_id, GeoPoint { lat: *lat, lon: *lon })?;
+                }
+            }
+
+            // Handle text values for full-text search
+            // Only index String values that might benefit from full-text search
+            if let Value::String(text) = after_value {
+                if let Some(fti) = fulltext_index {
+                    // Remove old text if present (this clears the posting lists)
+                    if before_value.is_some() {
+                        let _ = fti.remove(entity_type, field_name, entity_id);
+                    }
+                    // Insert new text
+                    fti.insert(entity_type, field_name, entity_id, text)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Remove from search indexes (vector, geo, full-text) for a delete.
+    fn remove_from_search_indexes(
+        entity_type: &str,
+        entity_id: [u8; 16],
+        before: &[(String, Value)],
+        vector_index: Option<&VectorIndex>,
+        geo_index: Option<&GeoIndex>,
+        fulltext_index: Option<&FullTextIndex>,
+    ) -> Result<(), Error> {
+        for (field_name, value) in before {
+            // Remove from vector index
+            if matches!(value, Value::Vector(_)) {
+                if let Some(vi) = vector_index {
+                    let _ = vi.remove(entity_type, field_name, entity_id);
+                }
+            }
+
+            // Remove from geo index
+            if matches!(value, Value::GeoPoint { .. }) {
+                if let Some(gi) = geo_index {
+                    let _ = gi.remove(entity_type, field_name, entity_id);
+                }
+            }
+
+            // Remove from full-text index
+            if matches!(value, Value::String(_)) {
+                if let Some(fti) = fulltext_index {
+                    let _ = fti.remove(entity_type, field_name, entity_id);
+                }
+            }
+        }
+
         Ok(())
     }
 }

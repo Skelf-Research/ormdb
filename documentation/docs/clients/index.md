@@ -1,28 +1,61 @@
 # Client Libraries
 
-ORMDB provides official client libraries for Rust, TypeScript, and Python.
+ORMDB provides official client libraries for Rust, TypeScript, and Python, plus an embedded mode for Rust applications.
+
+## Deployment Modes
+
+| Mode | Description | Languages |
+|------|-------------|-----------|
+| **Embedded** | In-process database, no server required | Rust only |
+| **Client** | Connect to remote ORMDB server | Rust, TypeScript, Python |
 
 ## Available Clients
 
-| Language | Package | Transport | ORM Adapters |
-|----------|---------|-----------|--------------|
-| **Rust** | `ormdb-client` | Native (nng) | - |
-| **TypeScript** | `@ormdb/client` | HTTP/JSON | Prisma, Drizzle, TypeORM, Kysely, Sequelize |
-| **Python** | `ormdb` | HTTP/JSON | SQLAlchemy, Django |
+| Language | Package | Transport | Embedded | ORM Adapters |
+|----------|---------|-----------|----------|--------------|
+| **Rust** | `ormdb` / `ormdb-client` | Native (nng) | Yes | - |
+| **TypeScript** | `@ormdb/client` | HTTP/JSON | - | Prisma, Drizzle, TypeORM, Kysely, Sequelize |
+| **Python** | `ormdb` | HTTP/JSON | - | SQLAlchemy, Django |
 
 ## Client Comparison
 
-| Feature | Rust | TypeScript | Python |
-|---------|------|------------|--------|
-| Async support | ✅ | ✅ | ✅ |
-| Connection pooling | ✅ | ✅ | ✅ |
-| Type safety | ✅ | ✅ | ❌ |
-| Zero-copy serialization | ✅ | ❌ | ❌ |
-| Streaming (CDC) | ✅ | ✅ | ✅ |
+| Feature | Rust (Embedded) | Rust (Client) | TypeScript | Python |
+|---------|-----------------|---------------|------------|--------|
+| Async support | Optional | Required | Yes | Yes |
+| Connection pooling | N/A | Yes | Yes | Yes |
+| Type safety | Yes | Yes | Yes | - |
+| Zero-copy serialization | Yes | Yes | - | - |
+| Transactions (OCC) | Yes | Yes | Yes | Yes |
+| Streaming (CDC) | Planned | Yes | Yes | Yes |
+| Schema definition | Yes | - | - | - |
 
 ## Quick Start
 
-=== "Rust"
+=== "Rust (Embedded)"
+
+    ```bash
+    cargo add ormdb
+    ```
+
+    ```rust
+    use ormdb::{Database, ScalarType};
+
+    let db = Database::open("./my_data")?;
+
+    db.schema()
+        .entity("User")
+            .field("id", ScalarType::Uuid).primary_key()
+            .field("name", ScalarType::String)
+        .apply()?;
+
+    let user_id = db.insert("User")
+        .set("name", "Alice")
+        .execute()?;
+
+    let users = db.query("User").execute()?;
+    ```
+
+=== "Rust (Client)"
 
     ```bash
     cargo add ormdb-client ormdb-proto
@@ -64,6 +97,7 @@ ORMDB provides official client libraries for Rust, TypeScript, and Python.
 
 ## Detailed Guides
 
-- **[Rust Client](rust.md)** - Native Rust client with full protocol support
+- **[Rust Client](rust.md)** - Embedded and client modes for Rust
 - **[TypeScript Client](typescript.md)** - TypeScript/JavaScript with ORM adapters
 - **[Python Client](python.md)** - Python with SQLAlchemy and Django support
+- **[Embedded Mode Guide](../guides/embedded-mode.md)** - Complete embedded mode reference

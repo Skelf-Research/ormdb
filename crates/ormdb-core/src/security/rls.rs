@@ -395,6 +395,31 @@ impl RlsPolicyCompiler {
             SimpleFilter::IsNotNull { field } => FilterExpr::is_not_null(field),
             SimpleFilter::Like { field, pattern } => FilterExpr::like(field, pattern),
             SimpleFilter::NotLike { field, pattern } => FilterExpr::NotLike { field, pattern },
+            // Search filter variants
+            SimpleFilter::VectorNearestNeighbor { field, query_vector, k, max_distance } => {
+                FilterExpr::VectorNearestNeighbor { field, query_vector, k, max_distance }
+            }
+            SimpleFilter::GeoWithinRadius { field, center_lat, center_lon, radius_km } => {
+                FilterExpr::GeoWithinRadius { field, center_lat, center_lon, radius_km }
+            }
+            SimpleFilter::GeoWithinBox { field, min_lat, min_lon, max_lat, max_lon } => {
+                FilterExpr::GeoWithinBox { field, min_lat, min_lon, max_lat, max_lon }
+            }
+            SimpleFilter::GeoWithinPolygon { field, vertices } => {
+                FilterExpr::GeoWithinPolygon { field, vertices }
+            }
+            SimpleFilter::GeoNearestNeighbor { field, center_lat, center_lon, k } => {
+                FilterExpr::GeoNearestNeighbor { field, center_lat, center_lon, k }
+            }
+            SimpleFilter::TextMatch { field, query, min_score } => {
+                FilterExpr::TextMatch { field, query, min_score }
+            }
+            SimpleFilter::TextPhrase { field, phrase } => {
+                FilterExpr::TextPhrase { field, phrase }
+            }
+            SimpleFilter::TextBoolean { field, must, should, must_not } => {
+                FilterExpr::TextBoolean { field, must, should, must_not }
+            }
         }
     }
 
@@ -413,6 +438,31 @@ impl RlsPolicyCompiler {
             FilterExpr::IsNotNull { field } => SimpleFilter::IsNotNull { field },
             FilterExpr::Like { field, pattern } => SimpleFilter::Like { field, pattern },
             FilterExpr::NotLike { field, pattern } => SimpleFilter::NotLike { field, pattern },
+            // Search filter variants
+            FilterExpr::VectorNearestNeighbor { field, query_vector, k, max_distance } => {
+                SimpleFilter::VectorNearestNeighbor { field, query_vector, k, max_distance }
+            }
+            FilterExpr::GeoWithinRadius { field, center_lat, center_lon, radius_km } => {
+                SimpleFilter::GeoWithinRadius { field, center_lat, center_lon, radius_km }
+            }
+            FilterExpr::GeoWithinBox { field, min_lat, min_lon, max_lat, max_lon } => {
+                SimpleFilter::GeoWithinBox { field, min_lat, min_lon, max_lat, max_lon }
+            }
+            FilterExpr::GeoWithinPolygon { field, vertices } => {
+                SimpleFilter::GeoWithinPolygon { field, vertices }
+            }
+            FilterExpr::GeoNearestNeighbor { field, center_lat, center_lon, k } => {
+                SimpleFilter::GeoNearestNeighbor { field, center_lat, center_lon, k }
+            }
+            FilterExpr::TextMatch { field, query, min_score } => {
+                SimpleFilter::TextMatch { field, query, min_score }
+            }
+            FilterExpr::TextPhrase { field, phrase } => {
+                SimpleFilter::TextPhrase { field, phrase }
+            }
+            FilterExpr::TextBoolean { field, must, should, must_not } => {
+                SimpleFilter::TextBoolean { field, must, should, must_not }
+            }
             // For compound expressions, wrap in a simple eq that's always true/false
             // This is a limitation - ideally we'd support nested AND/OR
             FilterExpr::And(_) | FilterExpr::Or(_) => SimpleFilter::IsNotNull {

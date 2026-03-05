@@ -30,6 +30,18 @@ pub enum ScalarType {
     Timestamp,
     /// UUID (128-bit identifier).
     Uuid,
+    /// Vector of floats for similarity search.
+    Vector {
+        /// Number of dimensions (e.g., 384, 768, 1536 for embeddings).
+        dimensions: u32,
+    },
+    /// Geographic point (latitude, longitude).
+    GeoPoint,
+    /// Full-text searchable string.
+    Text {
+        /// Language for stemming/analysis (e.g., "english").
+        language: String,
+    },
 }
 
 /// Field types - flat representation without recursion.
@@ -91,6 +103,37 @@ impl ScalarType {
     /// Check if this type is a string-like type.
     pub fn is_string_like(&self) -> bool {
         matches!(self, ScalarType::String | ScalarType::Bytes)
+    }
+
+    /// Check if this type is a vector for similarity search.
+    pub fn is_vector(&self) -> bool {
+        matches!(self, ScalarType::Vector { .. })
+    }
+
+    /// Check if this type is a geographic point.
+    pub fn is_geo(&self) -> bool {
+        matches!(self, ScalarType::GeoPoint)
+    }
+
+    /// Check if this type is full-text searchable.
+    pub fn is_text(&self) -> bool {
+        matches!(self, ScalarType::Text { .. })
+    }
+
+    /// Get vector dimensions if this is a vector type.
+    pub fn vector_dimensions(&self) -> Option<u32> {
+        match self {
+            ScalarType::Vector { dimensions } => Some(*dimensions),
+            _ => None,
+        }
+    }
+
+    /// Get text language if this is a text type.
+    pub fn text_language(&self) -> Option<&str> {
+        match self {
+            ScalarType::Text { language } => Some(language),
+            _ => None,
+        }
     }
 }
 
@@ -173,6 +216,31 @@ mod tests {
         assert!(ScalarType::String.is_string_like());
         assert!(ScalarType::Bytes.is_string_like());
         assert!(!ScalarType::Int32.is_string_like());
+    }
+
+    #[test]
+    fn test_vector_type() {
+        let vec_type = ScalarType::Vector { dimensions: 384 };
+        assert!(vec_type.is_vector());
+        assert!(!vec_type.is_numeric());
+        assert_eq!(vec_type.vector_dimensions(), Some(384));
+    }
+
+    #[test]
+    fn test_geo_type() {
+        let geo_type = ScalarType::GeoPoint;
+        assert!(geo_type.is_geo());
+        assert!(!geo_type.is_numeric());
+    }
+
+    #[test]
+    fn test_text_type() {
+        let text_type = ScalarType::Text {
+            language: "english".to_string(),
+        };
+        assert!(text_type.is_text());
+        assert!(!text_type.is_string_like()); // Text is a special type, not string-like
+        assert_eq!(text_type.text_language(), Some("english"));
     }
 
     #[test]

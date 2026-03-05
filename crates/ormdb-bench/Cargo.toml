@@ -81,3 +81,7 @@ harness = false
 name = "vs_postgres"
 harness = false
 required-features = ["postgres"]
+
+[[bench]]
+name = "oltp"
+harness = false

@@ -1,0 +1,45 @@
+[package]
+name = "ormdb-backup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "S3-compatible backup and restore for ORMDB"
+readme = "README.md"
+keywords = ["database", "backup", "s3", "restore", "snapshot"]
+categories = ["database", "filesystem"]
+
+[dependencies]
+# Internal
+ormdb-core.workspace = true
+ormdb-proto.workspace = true
+sled.workspace = true
+
+# S3/Object Storage
+object_store.workspace = true
+
+# Async
+tokio.workspace = true
+futures.workspace = true
+
+# Compression
+flate2.workspace = true
+
+# Serialization
+rkyv.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Utilities
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+bytes.workspace = true
+async-trait = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

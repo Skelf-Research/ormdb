@@ -1,15 +1,15 @@
 //! Interactive REPL implementation.
 
+use crate::backend::{self, Backend, ClientBackend};
 use crate::commands::{self, CommandResult};
 use crate::completer::OrmdbHelper;
 use crate::executor;
 use crate::formatter::{self, OutputFormat};
-use ormdb_client::{Client, ClientConfig};
+use crate::mode::ConnectionMode;
 use rustyline::error::ReadlineError;
 use rustyline::history::{DefaultHistory, History};
 use rustyline::{Config, Editor};
 use std::path::PathBuf;
-use std::time::Duration;
 
 /// Get the history file path.
 fn history_path() -> PathBuf {
@@ -20,28 +20,44 @@ fn history_path() -> PathBuf {
 
 /// Run the interactive REPL.
 pub async fn run(
-    config: ClientConfig,
+    mode: ConnectionMode,
     initial_format: OutputFormat,
+    timeout: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Try to connect
-    let mut client: Option<Client> = match Client::connect(config.clone()).await {
-        Ok(c) => {
-            println!(
-                "Connected to {} (schema v{})",
-                config.address,
-                c.schema_version()
-            );
-            Some(c)
-        }
-        Err(e) => {
-            println!("Warning: Could not connect to {}: {}", config.address, e);
-            println!("Use .connect <address> to connect.\n");
-            None
-        }
-    };
+    // Create backend
+    let mut backend: Option<Backend> =
+        match backend::create_backend(mode.clone(), timeout).await {
+            Ok(b) => {
+                let msg = match b.mode() {
+                    ConnectionMode::Embedded { path: None } => {
+                        "Opened in-memory database".to_string()
+                    }
+                    ConnectionMode::Embedded { path: Some(p) } => {
+                        format!("Opened database: {} (schema v{})", p.display(), b.schema_version())
+                    }
+                    ConnectionMode::Client { url } => {
+                        format!("Connected to {} (schema v{})", url, b.schema_version())
+                    }
+                };
+                println!("{}", msg);
+                Some(b)
+            }
+            Err(e) => {
+                match &mode {
+                    ConnectionMode::Client { url } => {
+                        println!("Warning: Could not connect to {}: {}", url, e);
+                        println!("Use .connect <address> to connect.\n");
+                    }
+                    ConnectionMode::Embedded { .. } => {
+                        println!("Error: Could not open database: {}", e);
+                        return Err(e.into());
+                    }
+                }
+                None
+            }
+        };
 
     let mut format = initial_format;
-    let mut _host = config.address.clone();
 
     // Set up rustyline
     let rl_config = Config::builder()
@@ -59,12 +75,25 @@ pub async fn run(
         let _ = rl.load_history(&hist_path);
     }
 
-    println!("ORMDB CLI - Type .help for commands, .exit to quit\n");
+    // Print welcome message
+    let mode_name = if mode.is_embedded() {
+        "embedded"
+    } else {
+        "client"
+    };
+    println!(
+        "ORMDB CLI ({} mode) - Type .help for commands, .exit to quit\n",
+        mode_name
+    );
 
     // Main REPL loop
     loop {
-        let prompt = if client.is_some() {
-            "ormdb> "
+        let prompt = if let Some(ref b) = backend {
+            if b.mode().is_embedded() {
+                "ormdb> "
+            } else {
+                "ormdb> "
+            }
         } else {
             "ormdb (disconnected)> "
         };
@@ -79,7 +108,7 @@ pub async fn run(
 
                 // Handle dot-commands
                 if commands::is_command(line) {
-                    match commands::handle_command(line, &client, format).await {
+                    match commands::handle_command(line, &backend, format).await {
                         CommandResult::Continue => {}
                         CommandResult::Exit => {
                             println!("Goodbye!");
@@ -94,23 +123,19 @@ pub async fn run(
                         }
                         CommandResult::Connect(addr) => {
                             // Disconnect existing client
-                            if let Some(c) = client.take() {
-                                let _ = c.close().await;
+                            if let Some(b) = backend.take() {
+                                let _ = b.close().await;
                             }
 
                             // Connect to new address
-                            let new_config = ClientConfig::new(&addr)
-                                .with_timeout(Duration::from_secs(30));
-
-                            match Client::connect(new_config).await {
-                                Ok(c) => {
+                            match ClientBackend::connect(&addr, timeout).await {
+                                Ok(b) => {
                                     println!(
                                         "Connected to {} (schema v{})",
                                         addr,
-                                        c.schema_version()
+                                        b.schema_version()
                                     );
-                                    _host = addr;
-                                    client = Some(c);
+                                    backend = Some(Backend::Client(b));
                                 }
                                 Err(e) => {
                                     println!("Failed to connect: {}", e);
@@ -118,8 +143,8 @@ pub async fn run(
                             }
                         }
                         CommandResult::Disconnect => {
-                            if let Some(c) = client.take() {
-                                let _ = c.close().await;
+                            if let Some(b) = backend.take() {
+                                let _ = b.close().await;
                                 println!("Disconnected");
                             } else {
                                 println!("Not connected");
@@ -138,8 +163,8 @@ pub async fn run(
                             print!("\x1B[2J\x1B[1;1H");
                         }
                         CommandResult::Explain(query_str) => {
-                            if let Some(ref c) = client {
-                                match executor::explain(c, &query_str).await {
+                            if let Some(ref b) = backend {
+                                match executor::explain(b, &query_str).await {
                                     Ok(result) => {
                                         println!("{}", executor::format_explain(&result));
                                     }
@@ -150,10 +175,66 @@ pub async fn run(
                             }
                         }
                         CommandResult::GetMetrics => {
-                            if let Some(ref c) = client {
-                                match executor::get_metrics(c).await {
+                            if let Some(ref b) = backend {
+                                match executor::get_metrics(b).await {
                                     Ok(result) => {
                                         println!("{}", executor::format_metrics(&result));
+                                    }
+                                    Err(e) => {
+                                        println!("Error: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        CommandResult::Flush => {
+                            if let Some(ref b) = backend {
+                                match b.flush().await {
+                                    Ok(()) => {
+                                        println!("Flushed to disk");
+                                    }
+                                    Err(e) => {
+                                        println!("Error: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        CommandResult::Compact => {
+                            if let Some(ref b) = backend {
+                                match b.compact().await {
+                                    Ok(msg) => {
+                                        println!("{}", msg);
+                                    }
+                                    Err(e) => {
+                                        println!("Error: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        CommandResult::Backup(options) => {
+                            if let Some(ref b) = backend {
+                                match b.backup(&options.destination, options.incremental).await {
+                                    Ok(msg) => {
+                                        println!("{}", msg);
+                                    }
+                                    Err(e) => {
+                                        println!("Error: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        CommandResult::Restore(options) => {
+                            println!("Restore is not yet implemented in the REPL.");
+                            println!(
+                                "To restore, use: ormdb --restore {} {}",
+                                options.source,
+                                options.target_lsn.map(|l| format!("--lsn {}", l)).unwrap_or_default()
+                            );
+                        }
+                        CommandResult::BackupStatus => {
+                            if let Some(ref b) = backend {
+                                match b.backup_status().await {
+                                    Ok(msg) => {
+                                        println!("{}", msg);
                                     }
                                     Err(e) => {
                                         println!("Error: {}", e);
@@ -166,9 +247,9 @@ pub async fn run(
                 }
 
                 // Execute query/mutation
-                if let Some(ref c) = client {
+                if let Some(ref b) = backend {
                     let formatter = formatter::create_formatter(format);
-                    match executor::execute(c, line, &*formatter).await {
+                    match executor::execute(b, line, &*formatter).await {
                         Ok(output) => {
                             if !output.is_empty() {
                                 println!("{}", output);
@@ -200,9 +281,9 @@ pub async fn run(
     // Save history
     let _ = rl.save_history(&hist_path);
 
-    // Close client
-    if let Some(c) = client {
-        let _ = c.close().await;
+    // Close backend
+    if let Some(b) = backend {
+        let _ = b.close().await;
     }
 
     Ok(())

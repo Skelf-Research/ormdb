@@ -401,6 +401,100 @@ active_users = User.active.all()
 
 ---
 
+## Search Lookups
+
+ORMDB provides custom Django lookups for vector, geographic, and full-text search.
+
+### Setup
+
+```python
+# In your app's AppConfig.ready() method
+from ormdb.django import register_lookups
+
+class MyAppConfig(AppConfig):
+    def ready(self):
+        register_lookups()
+```
+
+### Vector Search
+
+```python
+# Find similar products by embedding
+similar = Product.objects.filter(
+    embedding__vector_search={
+        'query_vector': [0.1, 0.2, 0.3, ...],
+        'k': 10,
+        'max_distance': 0.5,  # optional
+    }
+)
+```
+
+### Geographic Search
+
+```python
+# Radius search
+nearby = Restaurant.objects.filter(
+    location__geo_radius={
+        'lat': 37.7749,
+        'lon': -122.4194,
+        'radius_km': 5,
+    }
+)
+
+# Bounding box search
+in_box = Restaurant.objects.filter(
+    location__geo_box={
+        'min_lat': 37.7, 'min_lon': -122.5,
+        'max_lat': 37.85, 'max_lon': -122.35,
+    }
+)
+
+# Polygon search
+in_area = Restaurant.objects.filter(
+    location__geo_polygon={
+        'vertices': [(37.7, -122.5), (37.8, -122.5), (37.85, -122.4)],
+    }
+)
+
+# k-nearest
+closest = Restaurant.objects.filter(
+    location__geo_nearest={
+        'lat': 37.7749,
+        'lon': -122.4194,
+        'k': 10,
+    }
+)
+```
+
+### Full-Text Search
+
+```python
+# BM25 text search (string shorthand)
+articles = Article.objects.filter(content__text_match='rust programming')
+
+# BM25 text search with options
+articles = Article.objects.filter(
+    content__text_match={
+        'query': 'rust programming',
+        'min_score': 0.5,
+    }
+)
+
+# Phrase search
+exact = Article.objects.filter(content__text_phrase='quick brown fox')
+
+# Boolean search
+advanced = Article.objects.filter(
+    content__text_boolean={
+        'must': ['rust'],
+        'should': ['performance', 'safety'],
+        'must_not': ['deprecated'],
+    }
+)
+```
+
+---
+
 ## ORMDB-Specific Features
 
 ### Access Native Client

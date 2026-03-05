@@ -45,6 +45,9 @@ pub struct MetricsRegistry {
     access_path_bf_tree: AtomicU64,
     access_path_columnar: AtomicU64,
     access_path_row: AtomicU64,
+    access_path_vector: AtomicU64,
+    access_path_geo: AtomicU64,
+    access_path_fulltext: AtomicU64,
 
     // Join strategy metrics
     join_nested_loop: AtomicU64,
@@ -75,6 +78,12 @@ pub enum AccessPath {
     Columnar,
     /// Row-based scan.
     Row,
+    /// Vector nearest neighbor search using HNSW index.
+    VectorIndex,
+    /// Spatial query using R-tree geo index.
+    GeoIndex,
+    /// Full-text search using inverted index.
+    FulltextIndex,
 }
 
 /// Join strategy classification for metrics.
@@ -109,6 +118,9 @@ impl MetricsRegistry {
             access_path_bf_tree: AtomicU64::new(0),
             access_path_columnar: AtomicU64::new(0),
             access_path_row: AtomicU64::new(0),
+            access_path_vector: AtomicU64::new(0),
+            access_path_geo: AtomicU64::new(0),
+            access_path_fulltext: AtomicU64::new(0),
             join_nested_loop: AtomicU64::new(0),
             join_hash: AtomicU64::new(0),
         }
@@ -186,6 +198,15 @@ impl MetricsRegistry {
             }
             AccessPath::Row => {
                 self.access_path_row.fetch_add(1, Ordering::Relaxed);
+            }
+            AccessPath::VectorIndex => {
+                self.access_path_vector.fetch_add(1, Ordering::Relaxed);
+            }
+            AccessPath::GeoIndex => {
+                self.access_path_geo.fetch_add(1, Ordering::Relaxed);
+            }
+            AccessPath::FulltextIndex => {
+                self.access_path_fulltext.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
