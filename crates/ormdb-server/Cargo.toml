@@ -1,0 +1,20 @@
+[package]
+name = "ormdb-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ormdb-core.workspace = true
+ormdb-proto.workspace = true
+async-nng.workspace = true
+nng = "1"
+rkyv.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+sled.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

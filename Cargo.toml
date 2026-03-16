@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Core
+sled = { version = "0.34", features = ["compression"] }
+rkyv = { version = "0.8", features = ["bytecheck"] }
+mimalloc = { version = "0.1", default-features = false }
+async-nng = "0.2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Utilities
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+
+# Internal
+ormdb-core = { path = "crates/ormdb-core" }
+ormdb-proto = { path = "crates/ormdb-proto" }
+ormdb-client = { path = "crates/ormdb-client" }
