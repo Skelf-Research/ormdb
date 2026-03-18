@@ -1,6 +1,7 @@
 //! Field definitions for entities.
 
 use super::types::FieldType;
+use crate::security::field_security::FieldSecurity;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// A field definition within an entity.
@@ -18,6 +19,8 @@ pub struct FieldDef {
     pub computed: Option<ComputedField>,
     /// Whether this field should be indexed.
     pub indexed: bool,
+    /// Field-level security configuration.
+    pub security: Option<FieldSecurity>,
 }
 
 /// Default value for a field.
@@ -68,6 +71,7 @@ impl FieldDef {
             default: None,
             computed: None,
             indexed: false,
+            security: None,
         }
     }
 
@@ -80,6 +84,7 @@ impl FieldDef {
             default: None,
             computed: None,
             indexed: false,
+            security: None,
         }
     }
 
@@ -95,6 +100,7 @@ impl FieldDef {
             default: None,
             computed: None,
             indexed: false,
+            security: None,
         }
     }
 
@@ -116,6 +122,12 @@ impl FieldDef {
         self
     }
 
+    /// Set field-level security configuration.
+    pub fn with_security(mut self, security: FieldSecurity) -> Self {
+        self.security = Some(security);
+        self
+    }
+
     /// Check if this is a computed field.
     pub fn is_computed(&self) -> bool {
         self.computed.is_some()
@@ -124,6 +136,11 @@ impl FieldDef {
     /// Check if this field has a default value.
     pub fn has_default(&self) -> bool {
         self.default.is_some()
+    }
+
+    /// Check if this field has security configuration.
+    pub fn has_security(&self) -> bool {
+        self.security.is_some()
     }
 }
 

@@ -2,12 +2,151 @@
 
 use crate::value::Value;
 use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
+
+/// Aggregate function types for analytics queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+pub enum AggregateFunction {
+    /// Count of entities/values.
+    Count,
+    /// Sum of numeric values.
+    Sum,
+    /// Average of numeric values.
+    Avg,
+    /// Minimum value.
+    Min,
+    /// Maximum value.
+    Max,
+}
+
+/// A single aggregation operation.
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+pub struct Aggregation {
+    /// The aggregation function to apply.
+    pub function: AggregateFunction,
+    /// Field to aggregate (None for COUNT(*)).
+    pub field: Option<String>,
+}
+
+impl Aggregation {
+    /// Create a COUNT(*) aggregation.
+    pub fn count() -> Self {
+        Self {
+            function: AggregateFunction::Count,
+            field: None,
+        }
+    }
+
+    /// Create a COUNT(field) aggregation.
+    pub fn count_field(field: impl Into<String>) -> Self {
+        Self {
+            function: AggregateFunction::Count,
+            field: Some(field.into()),
+        }
+    }
+
+    /// Create a SUM aggregation.
+    pub fn sum(field: impl Into<String>) -> Self {
+        Self {
+            function: AggregateFunction::Sum,
+            field: Some(field.into()),
+        }
+    }
+
+    /// Create an AVG aggregation.
+    pub fn avg(field: impl Into<String>) -> Self {
+        Self {
+            function: AggregateFunction::Avg,
+            field: Some(field.into()),
+        }
+    }
+
+    /// Create a MIN aggregation.
+    pub fn min(field: impl Into<String>) -> Self {
+        Self {
+            function: AggregateFunction::Min,
+            field: Some(field.into()),
+        }
+    }
+
+    /// Create a MAX aggregation.
+    pub fn max(field: impl Into<String>) -> Self {
+        Self {
+            function: AggregateFunction::Max,
+            field: Some(field.into()),
+        }
+    }
+}
+
+/// An aggregate query for analytics operations.
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+pub struct AggregateQuery {
+    /// Root entity type to aggregate.
+    pub root_entity: String,
+    /// Aggregation operations to perform.
+    pub aggregations: Vec<Aggregation>,
+    /// Optional filter to apply before aggregation.
+    pub filter: Option<Filter>,
+}
+
+impl AggregateQuery {
+    /// Create a new aggregate query for an entity.
+    pub fn new(root_entity: impl Into<String>) -> Self {
+        Self {
+            root_entity: root_entity.into(),
+            aggregations: vec![],
+            filter: None,
+        }
+    }
+
+    /// Add an aggregation operation.
+    pub fn with_aggregation(mut self, aggregation: Aggregation) -> Self {
+        self.aggregations.push(aggregation);
+        self
+    }
+
+    /// Add a COUNT(*) aggregation.
+    pub fn count(mut self) -> Self {
+        self.aggregations.push(Aggregation::count());
+        self
+    }
+
+    /// Add a SUM aggregation.
+    pub fn sum(mut self, field: impl Into<String>) -> Self {
+        self.aggregations.push(Aggregation::sum(field));
+        self
+    }
+
+    /// Add an AVG aggregation.
+    pub fn avg(mut self, field: impl Into<String>) -> Self {
+        self.aggregations.push(Aggregation::avg(field));
+        self
+    }
+
+    /// Add a MIN aggregation.
+    pub fn min(mut self, field: impl Into<String>) -> Self {
+        self.aggregations.push(Aggregation::min(field));
+        self
+    }
+
+    /// Add a MAX aggregation.
+    pub fn max(mut self, field: impl Into<String>) -> Self {
+        self.aggregations.push(Aggregation::max(field));
+        self
+    }
+
+    /// Set a filter for this query.
+    pub fn with_filter(mut self, filter: Filter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+}
 
 /// A graph query that fetches entities and their relations.
 ///
 /// Note: To avoid recursive type issues with rkyv, includes are represented
 /// as a flat list with path-based nesting (e.g., "posts", "posts.comments").
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct GraphQuery {
     /// The root entity type to query.
     pub root_entity: String,
@@ -29,7 +168,7 @@ pub struct GraphQuery {
 /// - "posts" - include posts from root entity
 /// - "posts.comments" - include comments from posts
 /// - "posts.author" - include author from posts
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct RelationInclude {
     /// Dot-separated path to this relation (e.g., "posts.comments").
     pub path: String,
@@ -101,7 +240,7 @@ impl RelationInclude {
 }
 
 /// A filter condition wrapper.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct Filter {
     /// The filter expression.
     pub expression: FilterExpr,
@@ -124,7 +263,7 @@ impl From<FilterExpr> for Filter {
 ///
 /// Note: This uses a flat design without recursive Box types to work with rkyv.
 /// And/Or contain Vec<FilterExpr> which is handled specially.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum FilterExpr {
     /// Field equals value.
     Eq { field: String, value: Value },
@@ -159,7 +298,7 @@ pub enum FilterExpr {
 /// A simple (non-compound) filter for use in And/Or expressions.
 ///
 /// This flattens the filter structure to avoid recursion issues with rkyv.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum SimpleFilter {
     /// Field equals value.
     Eq { field: String, value: Value },
@@ -318,7 +457,7 @@ impl FilterExpr {
 }
 
 /// Order specification for sorting results.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct OrderSpec {
     /// Field to order by.
     pub field: String,
@@ -345,7 +484,7 @@ impl OrderSpec {
 }
 
 /// Sort direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum OrderDirection {
     /// Ascending order.
     Asc,
@@ -354,7 +493,7 @@ pub enum OrderDirection {
 }
 
 /// Pagination parameters.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct Pagination {
     /// Maximum number of results to return.
     pub limit: u32,

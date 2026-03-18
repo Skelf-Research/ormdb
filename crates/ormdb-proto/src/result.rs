@@ -1,12 +1,14 @@
 //! Result types for query responses.
 
+use crate::query::AggregateFunction;
 use crate::value::Value;
 use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 /// A block of entities from a query result.
 ///
 /// Uses column-oriented storage for efficient serialization and processing.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct EntityBlock {
     /// Entity type name.
     pub entity: String,
@@ -17,7 +19,7 @@ pub struct EntityBlock {
 }
 
 /// Column data within an entity block.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct ColumnData {
     /// Column (field) name.
     pub name: String,
@@ -92,7 +94,7 @@ impl EntityBlock {
 }
 
 /// A block of edges (relationships) from a query result.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct EdgeBlock {
     /// Relation name.
     pub relation: String,
@@ -101,7 +103,7 @@ pub struct EdgeBlock {
 }
 
 /// A single edge connecting two entities.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct Edge {
     /// ID of the source entity.
     pub from_id: [u8; 16],
@@ -150,7 +152,7 @@ impl EdgeBlock {
 }
 
 /// Complete result of a graph query.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct QueryResult {
     /// Entity blocks (one per entity type in the result).
     pub entities: Vec<EntityBlock>,
@@ -207,7 +209,7 @@ impl Default for QueryResult {
 }
 
 /// Result of a mutation operation.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct MutationResult {
     /// Number of entities affected.
     pub affected: u64,
@@ -238,6 +240,125 @@ impl MutationResult {
         Self {
             affected,
             inserted_ids: ids,
+        }
+    }
+}
+
+/// Result of an aggregate query.
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+pub struct AggregateResult {
+    /// Entity type that was aggregated.
+    pub entity: String,
+    /// Results for each aggregation.
+    pub values: Vec<AggregateValue>,
+}
+
+impl AggregateResult {
+    /// Create a new aggregate result.
+    pub fn new(entity: impl Into<String>, values: Vec<AggregateValue>) -> Self {
+        Self {
+            entity: entity.into(),
+            values,
+        }
+    }
+
+    /// Create an empty aggregate result.
+    pub fn empty(entity: impl Into<String>) -> Self {
+        Self {
+            entity: entity.into(),
+            values: vec![],
+        }
+    }
+
+    /// Get the first value (for single-aggregation queries).
+    pub fn first_value(&self) -> Option<&Value> {
+        self.values.first().map(|v| &v.value)
+    }
+
+    /// Get the count value if present.
+    pub fn count(&self) -> Option<i64> {
+        self.values
+            .iter()
+            .find(|v| matches!(v.function, AggregateFunction::Count))
+            .and_then(|v| match &v.value {
+                Value::Int64(n) => Some(*n),
+                _ => None,
+            })
+    }
+}
+
+/// A single aggregated value from an aggregate query.
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+pub struct AggregateValue {
+    /// Function that produced this value.
+    pub function: AggregateFunction,
+    /// Field that was aggregated (None for COUNT(*)).
+    pub field: Option<String>,
+    /// The aggregated value.
+    pub value: Value,
+}
+
+impl AggregateValue {
+    /// Create a new aggregate value.
+    pub fn new(function: AggregateFunction, field: Option<String>, value: Value) -> Self {
+        Self {
+            function,
+            field,
+            value,
+        }
+    }
+
+    /// Create a COUNT(*) result.
+    pub fn count(value: i64) -> Self {
+        Self {
+            function: AggregateFunction::Count,
+            field: None,
+            value: Value::Int64(value),
+        }
+    }
+
+    /// Create a COUNT(field) result.
+    pub fn count_field(field: impl Into<String>, value: i64) -> Self {
+        Self {
+            function: AggregateFunction::Count,
+            field: Some(field.into()),
+            value: Value::Int64(value),
+        }
+    }
+
+    /// Create a SUM result.
+    pub fn sum(field: impl Into<String>, value: f64) -> Self {
+        Self {
+            function: AggregateFunction::Sum,
+            field: Some(field.into()),
+            value: Value::Float64(value),
+        }
+    }
+
+    /// Create an AVG result.
+    pub fn avg(field: impl Into<String>, value: f64) -> Self {
+        Self {
+            function: AggregateFunction::Avg,
+            field: Some(field.into()),
+            value: Value::Float64(value),
+        }
+    }
+
+    /// Create a MIN result.
+    pub fn min(field: impl Into<String>, value: Value) -> Self {
+        Self {
+            function: AggregateFunction::Min,
+            field: Some(field.into()),
+            value,
+        }
+    }
+
+    /// Create a MAX result.
+    pub fn max(field: impl Into<String>, value: Value) -> Self {
+        Self {
+            function: AggregateFunction::Max,
+            field: Some(field.into()),
+            value,
         }
     }
 }

@@ -6,6 +6,8 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+use tracing::{debug, instrument};
+
 use crate::catalog::Catalog;
 use crate::error::Error;
 use crate::storage::StorageEngine;
@@ -35,22 +37,29 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Execute a GraphQuery and return results.
+    #[instrument(skip(self, query), fields(entity = %query.root_entity))]
     pub fn execute(&self, query: &GraphQuery) -> Result<QueryResult, Error> {
         self.execute_with_budget(query, FanoutBudget::default())
     }
 
     /// Execute a query with a custom fanout budget.
+    #[instrument(skip(self, query), fields(entity = %query.root_entity, max_entities = budget.max_entities))]
     pub fn execute_with_budget(
         &self,
         query: &GraphQuery,
         budget: FanoutBudget,
     ) -> Result<QueryResult, Error> {
+        let start = std::time::Instant::now();
+
         // Plan the query
         let planner = QueryPlanner::new(self.catalog);
         let plan = planner.plan_with_budget(query, budget)?;
 
         // Execute the plan
-        self.execute_plan(&plan)
+        let result = self.execute_plan(&plan);
+
+        debug!(duration_us = start.elapsed().as_micros() as u64, "query executed");
+        result
     }
 
     /// Execute a query with plan caching.
@@ -63,6 +72,7 @@ impl<'a> QueryExecutor<'a> {
     /// * `query` - The query to execute
     /// * `cache` - Plan cache for storing/retrieving compiled plans
     /// * `statistics` - Optional statistics for cost-based optimization
+    #[instrument(skip(self, query, cache, statistics), fields(entity = %query.root_entity))]
     pub fn execute_with_cache(
         &self,
         query: &GraphQuery,
@@ -74,12 +84,15 @@ impl<'a> QueryExecutor<'a> {
 
         // Try to get cached plan
         if let Some(mut plan) = cache.get(&fingerprint) {
+            debug!(cache_hit = true, "using cached plan");
             // Optionally optimize with current statistics
             if statistics.is_some() {
                 plan.optimize_include_order();
             }
             return self.execute_plan(&plan);
         }
+
+        debug!(cache_hit = false, "compiling new plan");
 
         // Plan the query
         let planner = QueryPlanner::new(self.catalog);
@@ -102,6 +115,7 @@ impl<'a> QueryExecutor<'a> {
     ///
     /// This uses the cost model to choose optimal join strategies based on
     /// actual table statistics rather than hardcoded estimates.
+    #[instrument(skip(self, query, statistics), fields(entity = %query.root_entity))]
     pub fn execute_with_statistics(
         &self,
         query: &GraphQuery,
@@ -241,6 +255,7 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Execute a pre-planned query.
+    #[instrument(skip(self, plan), fields(entity = %plan.root_entity, includes = plan.includes.len()))]
     pub fn execute_plan(&self, plan: &QueryPlan) -> Result<QueryResult, Error> {
         // Fetch and filter root entities
         let mut rows = self.fetch_entities(plan)?;
@@ -278,6 +293,7 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Fetch entities of a given type, applying filters.
+    #[instrument(skip(self, plan), fields(entity = %plan.root_entity, has_filter = plan.filter.is_some()))]
     fn fetch_entities(&self, plan: &QueryPlan) -> Result<Vec<EntityRow>, Error> {
         let mut rows = Vec::new();
 
@@ -300,6 +316,7 @@ impl<'a> QueryExecutor<'a> {
             });
         }
 
+        debug!(rows_fetched = rows.len(), "entities fetched");
         Ok(rows)
     }
 
@@ -437,6 +454,7 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Resolve relation includes, returning related entity blocks and edge blocks.
+    #[instrument(skip(self, parent_ids, includes, budget), fields(parent_count = parent_ids.len(), include_count = includes.len()))]
     fn resolve_includes(
         &self,
         parent_ids: &[[u8; 16]],
@@ -511,6 +529,7 @@ impl<'a> QueryExecutor<'a> {
     ///
     /// Uses hash join for larger datasets (>100 parents or >1000 estimated children)
     /// and nested loop for smaller datasets to minimize overhead.
+    #[instrument(skip(self, source_ids, include), fields(path = %include.path, source_count = source_ids.len()))]
     fn resolve_single_include(
         &self,
         source_ids: &[[u8; 16]],
@@ -521,6 +540,7 @@ impl<'a> QueryExecutor<'a> {
         // TODO: Use statistics for better estimation of child count
         let estimated_child_count = 1000; // Conservative estimate
         let strategy = JoinStrategy::select(source_ids.len(), estimated_child_count);
+        debug!(strategy = ?strategy, "selected join strategy");
 
         // Execute the join
         let (mut rows, edges) = execute_join(strategy, self.storage, source_ids, include)?;

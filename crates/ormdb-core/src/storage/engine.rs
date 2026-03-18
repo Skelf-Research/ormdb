@@ -342,6 +342,16 @@ impl StorageEngine {
     pub(crate) fn meta_tree(&self) -> &Tree {
         &self.meta_tree
     }
+
+    /// Get access to the type index tree (for transactions).
+    pub(crate) fn type_index_tree(&self) -> &Tree {
+        &self.type_index_tree
+    }
+
+    /// Get the underlying sled database (for opening new trees).
+    pub fn db(&self) -> &Db {
+        &self.db
+    }
 }
 
 #[cfg(test)]

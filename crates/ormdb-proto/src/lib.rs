@@ -31,25 +31,45 @@
 //! ```
 
 pub mod error;
+pub mod explain;
 pub mod framing;
 pub mod handshake;
 pub mod message;
+pub mod metrics;
 pub mod mutation;
 pub mod query;
+pub mod replication;
 pub mod result;
 pub mod value;
 
 pub use error::Error;
 
 // Re-export commonly used types at crate root
+pub use explain::{
+    BudgetSummary, CostSummary, ExplainResult, IncludeSummary, JoinInfo, JoinStrategyType,
+    OrderSummary, PaginationSummary, QueryPlanSummary,
+};
 pub use handshake::{Handshake, HandshakeResponse};
-pub use message::{error_codes, Operation, Request, Response, ResponsePayload, Status};
+pub use message::{
+    error_codes, ChangeEvent, ChangeType, Operation, Request, Response, ResponsePayload, Status,
+    Subscription,
+};
+pub use metrics::{
+    CacheMetrics, EntityCount, EntityQueryCount, MetricsResult, MutationMetrics, QueryMetrics,
+    StorageMetrics, TransportMetrics,
+};
 pub use mutation::{FieldValue, Mutation, MutationBatch};
 pub use query::{
-    Filter, FilterExpr, GraphQuery, OrderDirection, OrderSpec, Pagination, RelationInclude,
-    SimpleFilter,
+    AggregateFunction, AggregateQuery, Aggregation, Filter, FilterExpr, GraphQuery, OrderDirection,
+    OrderSpec, Pagination, RelationInclude, SimpleFilter,
 };
-pub use result::{ColumnData, Edge, EdgeBlock, EntityBlock, MutationResult, QueryResult};
+pub use replication::{
+    ChangeLogEntry, ReplicationRole, ReplicationStatus, StreamChangesRequest, StreamChangesResponse,
+};
+pub use result::{
+    AggregateResult, AggregateValue, ColumnData, Edge, EdgeBlock, EntityBlock, MutationResult,
+    QueryResult,
+};
 pub use value::Value;
 
 /// Protocol version for wire compatibility.

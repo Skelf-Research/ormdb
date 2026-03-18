@@ -2,9 +2,10 @@
 
 use crate::value::Value;
 use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 /// A mutation operation (insert, update, or delete).
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum Mutation {
     /// Insert a new entity.
     Insert {
@@ -41,7 +42,7 @@ pub enum Mutation {
 }
 
 /// A field name and value pair.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct FieldValue {
     /// Field name.
     pub field: String,
@@ -106,7 +107,7 @@ impl Mutation {
 }
 
 /// A batch of mutations to execute atomically.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub struct MutationBatch {
     /// Mutations to execute in order.
     pub mutations: Vec<Mutation>,
