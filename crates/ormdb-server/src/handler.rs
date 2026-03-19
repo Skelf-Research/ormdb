@@ -103,7 +103,11 @@ impl RequestHandler {
         request_id: u64,
         query: &ormdb_proto::GraphQuery,
     ) -> Result<Response, Error> {
-        let executor = self.database.executor();
+        let executor = if let Some(metrics) = &self.metrics {
+            self.database.executor_with_metrics(metrics.clone())
+        } else {
+            self.database.executor()
+        };
         let result = executor
             .execute(query)
             .map_err(|e| Error::Database(format!("query execution failed: {}", e)))?;

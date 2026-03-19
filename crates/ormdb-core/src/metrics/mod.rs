@@ -29,5 +29,6 @@ mod registry;
 
 pub use histogram::Histogram;
 pub use registry::{
-    new_shared_registry, MetricsRegistry, MutationType, SharedMetricsRegistry,
+    new_shared_registry, AccessPath, JoinStrategyMetric, MetricsRegistry, MutationType,
+    SharedMetricsRegistry,
 };

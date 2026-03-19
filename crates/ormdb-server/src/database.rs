@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use ormdb_core::catalog::Catalog;
+use ormdb_core::metrics::SharedMetricsRegistry;
 use ormdb_core::query::{PlanCache, QueryExecutor, TableStatistics};
 use ormdb_core::replication::ChangeLog;
 use ormdb_core::storage::{
@@ -116,6 +117,11 @@ impl Database {
     /// Create a query executor for this database.
     pub fn executor(&self) -> QueryExecutor<'_> {
         QueryExecutor::new(&self.storage, &self.catalog)
+    }
+
+    /// Create a query executor with metrics tracking.
+    pub fn executor_with_metrics(&self, metrics: SharedMetricsRegistry) -> QueryExecutor<'_> {
+        QueryExecutor::with_metrics(&self.storage, &self.catalog, metrics)
     }
 
     /// Get the current schema version.

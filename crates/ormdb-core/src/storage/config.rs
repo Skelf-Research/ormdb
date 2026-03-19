@@ -159,6 +159,15 @@ impl StorageConfig {
         self
     }
 
+    /// Get the database path, or None if this is a temporary database.
+    pub fn path(&self) -> Option<&std::path::Path> {
+        if self.temporary {
+            None
+        } else {
+            Some(&self.path)
+        }
+    }
+
     /// Convert to sled configuration.
     pub(crate) fn to_sled_config(&self) -> sled::Config {
         let mut config = sled::Config::new()
