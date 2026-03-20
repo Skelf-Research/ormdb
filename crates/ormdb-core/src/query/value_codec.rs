@@ -4,6 +4,7 @@
 //! and deserialize them back to `Value` types for query results.
 
 use crate::error::Error;
+use std::collections::HashSet;
 use ormdb_proto::Value;
 
 /// Type tag for encoded values.
@@ -126,21 +127,62 @@ pub fn decode_entity(data: &[u8]) -> Result<Vec<(String, Value)>, Error> {
     Ok(fields)
 }
 
+/// Decode only a subset of fields from entity data.
+///
+/// This avoids storing values for fields that are not needed.
+pub fn decode_entity_projected(
+    data: &[u8],
+    field_names: &HashSet<String>,
+) -> Result<Vec<(String, Value)>, Error> {
+    if field_names.is_empty() {
+        return decode_entity(data);
+    }
+
+    let mut cursor = 0;
+
+    // Read field count
+    if data.len() < 4 {
+        return Err(Error::InvalidData("Data too short for field count".into()));
+    }
+    let count = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+    cursor += 4;
+
+    let mut fields = Vec::with_capacity(count.min(field_names.len()));
+
+    for _ in 0..count {
+        // Read field name
+        if cursor + 2 > data.len() {
+            return Err(Error::InvalidData("Data too short for field name length".into()));
+        }
+        let name_len = u16::from_le_bytes(data[cursor..cursor + 2].try_into().unwrap()) as usize;
+        cursor += 2;
+
+        if cursor + name_len > data.len() {
+            return Err(Error::InvalidData("Data too short for field name".into()));
+        }
+        let name = String::from_utf8(data[cursor..cursor + name_len].to_vec())
+            .map_err(|_| Error::InvalidData("Invalid UTF-8 in field name".into()))?;
+        cursor += name_len;
+
+        if field_names.contains(&name) {
+            let (value, bytes_read) = decode_value(&data[cursor..])?;
+            cursor += bytes_read;
+            fields.push((name, value));
+        } else {
+            let skipped = skip_value(&data[cursor..])?;
+            cursor += skipped;
+        }
+    }
+
+    Ok(fields)
+}
+
 /// Decode only specific fields from entity data (for projections).
 ///
 /// This is more efficient than decoding all fields when only a subset is needed.
 pub fn decode_fields(data: &[u8], field_names: &[String]) -> Result<Vec<(String, Value)>, Error> {
-    let all_fields = decode_entity(data)?;
-
-    // Filter to requested fields
-    let mut result = Vec::with_capacity(field_names.len());
-    for name in field_names {
-        if let Some((_, value)) = all_fields.iter().find(|(n, _)| n == name) {
-            result.push((name.clone(), value.clone()));
-        }
-    }
-
-    Ok(result)
+    let set: HashSet<String> = field_names.iter().cloned().collect();
+    decode_entity_projected(data, &set)
 }
 
 /// Get a single field value by name.
@@ -638,6 +680,7 @@ fn decode_value(data: &[u8]) -> Result<(Value, usize), Error> {
 
     Ok((value, cursor))
 }
+
 
 #[cfg(test)]
 mod tests {

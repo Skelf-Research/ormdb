@@ -11,6 +11,9 @@ use rand::{Rng, SeedableRng};
 /// Scale factor for benchmark data generation.
 #[derive(Clone, Copy, Debug)]
 pub enum Scale {
+    /// Tiny scale: ~30 entities total (10 users, 20 posts, 20 comments)
+    /// Use for quick tests and development iteration.
+    Tiny,
     /// Small scale: ~100 entities per type
     Small,
     /// Medium scale: ~10,000 entities per type
@@ -23,6 +26,7 @@ impl Scale {
     /// Get the entity count for this scale.
     pub fn count(&self) -> usize {
         match self {
+            Scale::Tiny => 10,
             Scale::Small => 100,
             Scale::Medium => 10_000,
             Scale::Large => 100_000,
@@ -32,6 +36,7 @@ impl Scale {
     /// Get the posts per user ratio.
     pub fn posts_per_user(&self) -> usize {
         match self {
+            Scale::Tiny => 2,
             Scale::Small => 5,
             Scale::Medium => 10,
             Scale::Large => 10,
@@ -41,6 +46,7 @@ impl Scale {
     /// Get the comments per post ratio.
     pub fn comments_per_post(&self) -> usize {
         match self {
+            Scale::Tiny => 1,
             Scale::Small => 3,
             Scale::Medium => 5,
             Scale::Large => 5,
@@ -300,6 +306,7 @@ mod tests {
 
     #[test]
     fn test_scale_counts() {
+        assert_eq!(Scale::Tiny.count(), 10);
         assert_eq!(Scale::Small.count(), 100);
         assert_eq!(Scale::Medium.count(), 10_000);
         assert_eq!(Scale::Large.count(), 100_000);

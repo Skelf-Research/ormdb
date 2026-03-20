@@ -14,6 +14,12 @@ use ormdb_proto::Value;
 /// Default cache size for bf-tree (64MB).
 const DEFAULT_CACHE_SIZE: usize = 64 * 1024 * 1024;
 
+/// Max key length for bf-tree keys (includes entity/column/value/id).
+const DEFAULT_MAX_KEY_LEN: usize = 256;
+
+/// Max record size for bf-tree leaf pages.
+const DEFAULT_MAX_RECORD_SIZE: usize = 1536;
+
 /// Buffer size for scan operations.
 const SCAN_BUFFER_SIZE: usize = 1024;
 
@@ -22,7 +28,7 @@ const SCAN_BUFFER_SIZE: usize = 1024;
 /// Stores a mapping from (column_name, value) -> entity_id for each entity type.
 /// This enables O(log N) lookups for WHERE column > value, BETWEEN, etc.
 ///
-/// Key format: `[entity_type:var][0x00][column_name:var][0x00][encoded_value:var]`
+/// Key format: `[entity_type:var][0x00][column_name:var][0x00][encoded_value:var][0x00][entity_id:16]`
 /// Value format: `[entity_id:16]`
 ///
 /// Unlike HashIndex which stores multiple entity IDs per key, BTreeIndex stores
@@ -34,7 +40,10 @@ pub struct BTreeIndex {
 impl BTreeIndex {
     /// Open or create a B-tree index at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let tree = BfTree::new(path.as_ref(), DEFAULT_CACHE_SIZE)
+        let mut config = Config::new(path.as_ref(), DEFAULT_CACHE_SIZE);
+        config.cb_max_key_len(DEFAULT_MAX_KEY_LEN);
+        config.cb_max_record_size(DEFAULT_MAX_RECORD_SIZE);
+        let tree = BfTree::with_config(config, None)
             .map_err(|e| Error::InvalidData(format!("failed to open bf-tree: {:?}", e)))?;
         Ok(Self {
             tree: Arc::new(tree),
@@ -50,23 +59,17 @@ impl BTreeIndex {
         })
     }
 
-    /// Build the index key for an entity type, column, and value.
+    /// Build the index key for an entity type, column, value, and entity ID.
     ///
-    /// Format: `[entity_type][0x00][column_name][0x00][encoded_value]`
-    fn build_key(entity_type: &str, column_name: &str, value: &Value) -> Vec<u8> {
-        let mut key = Vec::new();
-
-        // Entity type
-        key.extend_from_slice(entity_type.as_bytes());
-        key.push(0x00);
-
-        // Column name
-        key.extend_from_slice(column_name.as_bytes());
-        key.push(0x00);
-
-        // Encoded value (sortable format)
-        key.extend(Self::encode_value_sortable(value));
-
+    /// Format: `[entity_type][0x00][column_name][0x00][encoded_value][0x00][entity_id]`
+    fn build_key(
+        entity_type: &str,
+        column_name: &str,
+        value: &Value,
+        entity_id: [u8; 16],
+    ) -> Vec<u8> {
+        let mut key = Self::build_value_prefix(entity_type, column_name, value);
+        key.extend_from_slice(&entity_id);
         key
     }
 
@@ -80,15 +83,21 @@ impl BTreeIndex {
         key
     }
 
-    /// Encode a value in a sortable format for B-tree keys.
+    /// Build a prefix key for a specific column value (excluding entity ID).
+    fn build_value_prefix(entity_type: &str, column_name: &str, value: &Value) -> Vec<u8> {
+        let mut key = Self::build_prefix(entity_type, column_name);
+        Self::encode_value_sortable_into(value, &mut key);
+        key.push(0x00);
+        key
+    }
+
+    /// Encode a value in a sortable format for B-tree keys, reusing the provided buffer.
     ///
     /// Uses a format that preserves sort order for byte comparison:
     /// - Integers: Big-endian with sign bit flipped for correct ordering
     /// - Floats: IEEE 754 with sign handling for correct ordering
     /// - Strings: UTF-8 bytes directly (lexicographic order)
-    fn encode_value_sortable(value: &Value) -> Vec<u8> {
-        let mut buf = Vec::new();
-
+    fn encode_value_sortable_into(value: &Value, buf: &mut Vec<u8>) {
         match value {
             Value::Null => {
                 buf.push(0x00); // Null sorts first
@@ -151,7 +160,15 @@ impl BTreeIndex {
                 buf.push(0xFF); // Unsupported types sort last
             }
         }
+    }
 
+    /// Encode a value in a sortable format for B-tree keys.
+    /// Convenience wrapper that allocates a new buffer.
+    /// Used by tests and as a fallback for simple cases.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn encode_value_sortable(value: &Value) -> Vec<u8> {
+        let mut buf = Vec::new();
+        Self::encode_value_sortable_into(value, &mut buf);
         buf
     }
 
@@ -159,9 +176,8 @@ impl BTreeIndex {
     /// Returns a key that is guaranteed to be greater than any value.
     fn build_end_key_max(entity_type: &str, column_name: &str) -> Vec<u8> {
         let mut key = Self::build_prefix(entity_type, column_name);
-        // Add max byte to ensure we capture all values
-        key.push(0xFF);
-        key.push(0xFF);
+        // Add max bytes to ensure we capture all values and entity IDs
+        key.extend_from_slice(&[0xFF; 64]);
         key
     }
 
@@ -174,6 +190,18 @@ impl BTreeIndex {
         key
     }
 
+    fn build_value_min_key(entity_type: &str, column_name: &str, value: &Value) -> Vec<u8> {
+        let mut key = Self::build_value_prefix(entity_type, column_name, value);
+        key.extend_from_slice(&[0x00; 16]);
+        key
+    }
+
+    fn build_value_max_key(entity_type: &str, column_name: &str, value: &Value) -> Vec<u8> {
+        let mut key = Self::build_value_prefix(entity_type, column_name, value);
+        key.extend_from_slice(&[0xFF; 16]);
+        key
+    }
+
     /// Insert an entity ID into the index for a value.
     pub fn insert(
         &self,
@@ -182,7 +210,7 @@ impl BTreeIndex {
         value: &Value,
         entity_id: [u8; 16],
     ) -> Result<(), Error> {
-        let key = Self::build_key(entity_type, column_name, value);
+        let key = Self::build_key(entity_type, column_name, value, entity_id);
         // Store entity_id as the value
         self.tree.insert(&key, &entity_id);
         Ok(())
@@ -194,9 +222,9 @@ impl BTreeIndex {
         entity_type: &str,
         column_name: &str,
         value: &Value,
-        _entity_id: [u8; 16],
+        entity_id: [u8; 16],
     ) -> Result<(), Error> {
-        let key = Self::build_key(entity_type, column_name, value);
+        let key = Self::build_key(entity_type, column_name, value, entity_id);
         self.tree.delete(&key);
         Ok(())
     }
@@ -208,7 +236,7 @@ impl BTreeIndex {
         column_name: &str,
         threshold: &Value,
     ) -> Result<Vec<[u8; 16]>, Error> {
-        let start_key = Self::build_key(entity_type, column_name, threshold);
+        let start_key = Self::build_value_max_key(entity_type, column_name, threshold);
         let end_key = Self::build_end_key_max(entity_type, column_name);
 
         self.scan_range(&start_key, &end_key, true)
@@ -221,7 +249,7 @@ impl BTreeIndex {
         column_name: &str,
         threshold: &Value,
     ) -> Result<Vec<[u8; 16]>, Error> {
-        let start_key = Self::build_key(entity_type, column_name, threshold);
+        let start_key = Self::build_value_min_key(entity_type, column_name, threshold);
         let end_key = Self::build_end_key_max(entity_type, column_name);
 
         self.scan_range(&start_key, &end_key, false)
@@ -235,7 +263,7 @@ impl BTreeIndex {
         threshold: &Value,
     ) -> Result<Vec<[u8; 16]>, Error> {
         let start_key = Self::build_start_key_min(entity_type, column_name);
-        let end_key = Self::build_key(entity_type, column_name, threshold);
+        let end_key = Self::build_value_min_key(entity_type, column_name, threshold);
 
         // Exclude end (threshold) for strict less-than
         self.scan_range_exclude_end(&start_key, &end_key, true)
@@ -249,7 +277,7 @@ impl BTreeIndex {
         threshold: &Value,
     ) -> Result<Vec<[u8; 16]>, Error> {
         let start_key = Self::build_start_key_min(entity_type, column_name);
-        let end_key = Self::build_key(entity_type, column_name, threshold);
+        let end_key = Self::build_value_max_key(entity_type, column_name, threshold);
 
         // Include end (threshold) for less-than-or-equal
         self.scan_range_exclude_end(&start_key, &end_key, false)
@@ -263,10 +291,35 @@ impl BTreeIndex {
         low: &Value,
         high: &Value,
     ) -> Result<Vec<[u8; 16]>, Error> {
-        let start_key = Self::build_key(entity_type, column_name, low);
-        let end_key = Self::build_key(entity_type, column_name, high);
+        let start_key = Self::build_value_min_key(entity_type, column_name, low);
+        let end_key = Self::build_value_max_key(entity_type, column_name, high);
 
         // Include both endpoints
+        self.scan_range(&start_key, &end_key, false)
+    }
+
+    /// Scan all entity IDs for a column in value order.
+    pub fn scan_all(
+        &self,
+        entity_type: &str,
+        column_name: &str,
+    ) -> Result<Vec<[u8; 16]>, Error> {
+        let start_key = Self::build_start_key_min(entity_type, column_name);
+        let end_key = Self::build_end_key_max(entity_type, column_name);
+
+        self.scan_range(&start_key, &end_key, false)
+    }
+
+    /// Lookup all entity IDs where value == target. O(log N + K) operation.
+    pub fn scan_equal(
+        &self,
+        entity_type: &str,
+        column_name: &str,
+        value: &Value,
+    ) -> Result<Vec<[u8; 16]>, Error> {
+        let start_key = Self::build_value_min_key(entity_type, column_name, value);
+        let end_key = Self::build_value_max_key(entity_type, column_name, value);
+
         self.scan_range(&start_key, &end_key, false)
     }
 
@@ -340,8 +393,13 @@ impl BTreeIndex {
     ///
     /// Unlike hash index, we don't have a quick way to check, so we try a minimal scan.
     pub fn has_index(&self, entity_type: &str, column_name: &str) -> Result<bool, Error> {
-        let start_key = Self::build_prefix(entity_type, column_name);
-        let mut end_key = start_key.clone();
+        // Build end key directly without cloning start_key
+        let mut end_key = Vec::new();
+        end_key.extend_from_slice(entity_type.as_bytes());
+        end_key.push(0x00);
+        end_key.extend_from_slice(column_name.as_bytes());
+        end_key.push(0x00);
+        let start_key = end_key.clone();
         end_key.push(0xFF);
 
         // Try to scan just one item
@@ -374,6 +432,38 @@ impl BTreeIndex {
             count += 1;
         }
         Ok(count)
+    }
+
+    /// Drop all index entries for a specific column.
+    ///
+    /// Collects all keys first, then deletes them. For very large indexes,
+    /// this may use significant memory, but it's simpler and more reliable
+    /// than incremental approaches that can have issues with bf-tree's
+    /// buffered delete behavior.
+    pub fn drop_column_index(&self, entity_type: &str, column_name: &str) -> Result<(), Error> {
+        let start_key = Self::build_start_key_min(entity_type, column_name);
+        let end_key = Self::build_end_key_max(entity_type, column_name);
+
+        let mut buffer = vec![0u8; SCAN_BUFFER_SIZE];
+        let mut keys = Vec::new();
+
+        let mut iter = self
+            .tree
+            .scan_with_end_key(&start_key, &end_key, ScanReturnField::Key)
+            .map_err(|e| Error::InvalidData(format!("scan error: {:?}", e)))?;
+
+        while let Some((key_len, _value_len)) = iter.next(&mut buffer) {
+            keys.push(buffer[..key_len].to_vec());
+        }
+
+        // Drop iterator before deleting to avoid holding locks
+        drop(iter);
+
+        for key in keys {
+            self.tree.delete(&key);
+        }
+
+        Ok(())
     }
 }
 
@@ -446,6 +536,28 @@ mod tests {
 
         // Should find 20, 25
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_scan_equal_with_duplicates() {
+        let index = test_index();
+
+        let id1 = [1u8; 16];
+        let id2 = [2u8; 16];
+        let id3 = [3u8; 16];
+
+        index.insert("User", "status", &Value::String("active".to_string()), id1).unwrap();
+        index.insert("User", "status", &Value::String("active".to_string()), id2).unwrap();
+        index.insert("User", "status", &Value::String("active".to_string()), id3).unwrap();
+
+        let results = index
+            .scan_equal("User", "status", &Value::String("active".to_string()))
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert!(results.contains(&id1));
+        assert!(results.contains(&id2));
+        assert!(results.contains(&id3));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use super::filter::{extract_filter_fields, FilterEvaluator};
 use super::join::{execute_join, EntityRow, JoinStrategy};
 use super::planner::{FanoutBudget, IncludePlan, QueryPlan, QueryPlanner};
 use super::statistics::TableStatistics;
-use super::value_codec::decode_entity;
+use super::value_codec::{decode_entity, decode_entity_projected};
 
 use ormdb_proto::{
     ColumnData, Edge, EdgeBlock, EntityBlock, GraphQuery, OrderDirection, QueryResult, Value,
@@ -112,11 +112,18 @@ impl<'a> QueryExecutor<'a> {
         // Try to get cached plan
         if let Some(mut plan) = cache.get(&fingerprint) {
             debug!(cache_hit = true, "using cached plan");
+            if let Some(metrics) = &self.metrics {
+                metrics.record_cache_hit();
+            }
             // Optionally optimize with current statistics
             if statistics.is_some() {
                 plan.optimize_include_order();
+                plan.deduplicate_includes();
             }
-            let result = self.execute_plan(&plan);
+            let result = match statistics {
+                Some(stats) => self.execute_plan_with_cost_model(&plan, stats),
+                None => self.execute_plan(&plan),
+            };
             let duration_us = start.elapsed().as_micros() as u64;
             if let Some(metrics) = &self.metrics {
                 if result.is_ok() {
@@ -127,6 +134,9 @@ impl<'a> QueryExecutor<'a> {
         }
 
         debug!(cache_hit = false, "compiling new plan");
+        if let Some(metrics) = &self.metrics {
+            metrics.record_cache_miss();
+        }
 
         // Plan the query
         let planner = QueryPlanner::new(self.catalog);
@@ -142,7 +152,10 @@ impl<'a> QueryExecutor<'a> {
         cache.insert(fingerprint, plan.clone(), schema_version);
 
         // Execute
-        let result = self.execute_plan(&plan);
+        let result = match statistics {
+            Some(stats) => self.execute_plan_with_cost_model(&plan, stats),
+            None => self.execute_plan(&plan),
+        };
         let duration_us = start.elapsed().as_micros() as u64;
         if let Some(metrics) = &self.metrics {
             if result.is_ok() {
@@ -224,6 +237,53 @@ impl<'a> QueryExecutor<'a> {
         Ok(QueryResult::new(entities, edge_blocks, has_more))
     }
 
+    fn collect_needed_fields_for_plan(&self, plan: &QueryPlan) -> Option<HashSet<String>> {
+        if plan.fields.is_empty() {
+            return None;
+        }
+
+        let mut fields: HashSet<String> = plan.fields.iter().cloned().collect();
+
+        if let Some(filter) = &plan.filter {
+            fields.extend(extract_filter_fields(filter));
+        }
+
+        for order in &plan.order_by {
+            fields.insert(order.field.clone());
+        }
+
+        Some(fields)
+    }
+
+    fn collect_needed_fields_for_include(&self, include: &IncludePlan) -> Option<HashSet<String>> {
+        if include.fields.is_empty() {
+            return None;
+        }
+
+        let mut fields: HashSet<String> = include.fields.iter().cloned().collect();
+
+        if let Some(filter) = &include.filter {
+            fields.extend(extract_filter_fields(filter));
+        }
+
+        for order in &include.order_by {
+            fields.insert(order.field.clone());
+        }
+
+        Some(fields)
+    }
+
+    fn decode_record_fields(
+        &self,
+        data: &[u8],
+        needed_fields: Option<&HashSet<String>>,
+    ) -> Result<Vec<(String, Value)>, Error> {
+        match needed_fields {
+            Some(fields) => decode_entity_projected(data, fields),
+            None => decode_entity(data),
+        }
+    }
+
     /// Resolve relation includes using cost model for strategy selection.
     fn resolve_includes_with_cost_model(
         &self,
@@ -257,6 +317,37 @@ impl<'a> QueryExecutor<'a> {
             };
 
             if source_ids.is_empty() {
+                continue;
+            }
+
+            if let Some((mut rows, edges)) = self.resolve_include_via_index(source_ids, include)? {
+                total_edges += edges.len();
+                if total_edges > budget.max_edges {
+                    return Err(Error::InvalidData(format!(
+                        "Query would return {} edges, exceeding budget of {}",
+                        total_edges, budget.max_edges
+                    )));
+                }
+
+                self.sort_rows(&mut rows, &include.order_by);
+
+                let (rows, edges) = if let Some(pagination) = &include.pagination {
+                    let source_id_set: HashSet<[u8; 16]> = source_ids.iter().cloned().collect();
+                    self.apply_per_parent_pagination(&rows, &edges, &source_id_set, pagination)
+                } else {
+                    (rows, edges)
+                };
+
+                let resolved: Vec<[u8; 16]> = rows.iter().map(|r| r.id).collect();
+                resolved_ids.insert(include.path.clone(), resolved);
+
+                let block = self.build_entity_block(include.target_entity(), rows, &include.fields);
+                entity_blocks.push(block);
+
+                if !edges.is_empty() {
+                    edge_blocks.push(EdgeBlock::with_edges(&include.path, edges));
+                }
+
                 continue;
             }
 
@@ -363,28 +454,28 @@ impl<'a> QueryExecutor<'a> {
         }
 
         // Try B-tree index for range filters (O(log N) lookup)
-        if let Some(btree) = self.storage.btree_index() {
+        if self.storage.btree_index().is_some() {
             match &plan.filter {
                 Some(ormdb_proto::FilterExpr::Gt { field, value }) => {
-                    if btree.has_index(&plan.root_entity, field)? {
+                    if self.storage.ensure_btree_index(&plan.root_entity, field)? {
                         debug!(path = "btree-index", field = %field, op = "gt", "using B-tree index for range filter");
                         return self.fetch_entities_via_btree_gt(plan, field, value, false);
                     }
                 }
                 Some(ormdb_proto::FilterExpr::Ge { field, value }) => {
-                    if btree.has_index(&plan.root_entity, field)? {
+                    if self.storage.ensure_btree_index(&plan.root_entity, field)? {
                         debug!(path = "btree-index", field = %field, op = "ge", "using B-tree index for range filter");
                         return self.fetch_entities_via_btree_gt(plan, field, value, true);
                     }
                 }
                 Some(ormdb_proto::FilterExpr::Lt { field, value }) => {
-                    if btree.has_index(&plan.root_entity, field)? {
+                    if self.storage.ensure_btree_index(&plan.root_entity, field)? {
                         debug!(path = "btree-index", field = %field, op = "lt", "using B-tree index for range filter");
                         return self.fetch_entities_via_btree_lt(plan, field, value, false);
                     }
                 }
                 Some(ormdb_proto::FilterExpr::Le { field, value }) => {
-                    if btree.has_index(&plan.root_entity, field)? {
+                    if self.storage.ensure_btree_index(&plan.root_entity, field)? {
                         debug!(path = "btree-index", field = %field, op = "le", "using B-tree index for range filter");
                         return self.fetch_entities_via_btree_lt(plan, field, value, true);
                     }
@@ -400,6 +491,23 @@ impl<'a> QueryExecutor<'a> {
         if plan.filter.is_some() {
             debug!(path = "columnar", "using columnar path for filtered query");
             return self.fetch_entities_columnar(plan);
+        }
+
+        // Use B-tree index for ordered scans when possible.
+        if plan.order_by.len() == 1 {
+            let order = &plan.order_by[0];
+            if self
+                .storage
+                .ensure_btree_index(&plan.root_entity, &order.field)?
+            {
+                debug!(
+                    path = "btree-index",
+                    field = %order.field,
+                    op = "order_by",
+                    "using B-tree index for ordered scan"
+                );
+                return self.fetch_entities_via_btree_order(plan, &order.field, order.direction);
+            }
         }
 
         // Use row-based path for unfiltered queries (simpler, avoids columnar overhead)
@@ -438,7 +546,7 @@ impl<'a> QueryExecutor<'a> {
             .map(extract_filter_fields)
             .unwrap_or_default();
 
-        let select_fields: HashSet<String> = if plan.fields.is_empty() {
+        let mut select_fields: HashSet<String> = if plan.fields.is_empty() {
             // Get all field names from the entity definition in the catalog
             plan.root_entity_def
                 .fields
@@ -448,6 +556,10 @@ impl<'a> QueryExecutor<'a> {
         } else {
             plan.fields.iter().cloned().collect()
         };
+
+        for order in &plan.order_by {
+            select_fields.insert(order.field.clone());
+        }
 
         // PHASE 1: Collect matching entity IDs with streaming filter + early termination
         let (matching_ids, filter_values) = self.collect_matching_ids_columnar(
@@ -605,6 +717,7 @@ impl<'a> QueryExecutor<'a> {
         value: &Value,
     ) -> Result<Vec<EntityRow>, Error> {
         self.record_access_path(AccessPath::HashIndex);
+        let needed_fields = self.collect_needed_fields_for_plan(plan);
         // O(1) lookup - get all entity IDs that match this value
         let matching_ids = self.storage.hash_index().lookup(&plan.root_entity, field, value)?;
 
@@ -636,7 +749,7 @@ impl<'a> QueryExecutor<'a> {
 
         for &id in ids_to_fetch {
             if let Some((_version, record)) = self.storage.get_latest(&id)? {
-                let fields = decode_entity(&record.data)?;
+                let fields = self.decode_record_fields(&record.data, needed_fields.as_ref())?;
                 rows.push(EntityRow { id, fields });
             }
         }
@@ -699,6 +812,26 @@ impl<'a> QueryExecutor<'a> {
         self.fetch_rows_for_ids(plan, &matching_ids)
     }
 
+    /// Fetch entities using B-tree index for ordered scans.
+    fn fetch_entities_via_btree_order(
+        &self,
+        plan: &QueryPlan,
+        field: &str,
+        direction: OrderDirection,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.record_access_path(AccessPath::BfTree);
+        let btree = self.storage.btree_index().ok_or_else(|| {
+            Error::InvalidData("B-tree index not available".to_string())
+        })?;
+
+        let mut matching_ids = btree.scan_all(&plan.root_entity, field)?;
+        if matches!(direction, OrderDirection::Desc) {
+            matching_ids.reverse();
+        }
+
+        self.fetch_rows_for_ids(plan, &matching_ids)
+    }
+
     /// Fetch rows from row store for a list of entity IDs.
     ///
     /// Shared helper for index-based lookups (hash and B-tree).
@@ -711,6 +844,8 @@ impl<'a> QueryExecutor<'a> {
             debug!(rows_fetched = 0, path = "index-row", "no matching entities");
             return Ok(vec![]);
         }
+
+        let needed_fields = self.collect_needed_fields_for_plan(plan);
 
         // Apply early LIMIT if no ORDER BY (we can truncate IDs early)
         let can_early_terminate = plan.order_by.is_empty();
@@ -734,7 +869,7 @@ impl<'a> QueryExecutor<'a> {
 
         for &id in ids_to_fetch {
             if let Some((_version, record)) = self.storage.get_latest(&id)? {
-                let fields = decode_entity(&record.data)?;
+                let fields = self.decode_record_fields(&record.data, needed_fields.as_ref())?;
                 rows.push(EntityRow { id, fields });
             }
         }
@@ -746,6 +881,7 @@ impl<'a> QueryExecutor<'a> {
     /// Fetch entities using the row store (fallback path).
     fn fetch_entities_row_based(&self, plan: &QueryPlan) -> Result<Vec<EntityRow>, Error> {
         self.record_access_path(AccessPath::Row);
+        let needed_fields = self.collect_needed_fields_for_plan(plan);
         // Early termination optimization
         let can_early_terminate = plan.order_by.is_empty();
         let target_count = if can_early_terminate {
@@ -762,7 +898,7 @@ impl<'a> QueryExecutor<'a> {
             let (entity_id, _version_ts, record) = result?;
 
             // Decode the entity data
-            let fields = decode_entity(&record.data)?;
+            let fields = self.decode_record_fields(&record.data, needed_fields.as_ref())?;
 
             // Apply filter if present
             if let Some(filter) = &plan.filter {
@@ -901,23 +1037,27 @@ impl<'a> QueryExecutor<'a> {
             projected_fields.to_vec()
         };
 
-        // Build columns
-        let columns: Vec<ColumnData> = field_names
+        // Build columns by moving values out of rows
+        let mut columns: Vec<ColumnData> = field_names
             .iter()
-            .map(|name| {
-                let values: Vec<Value> = rows
-                    .iter()
-                    .map(|row| {
-                        row.fields
-                            .iter()
-                            .find(|(n, _)| n == name)
-                            .map(|(_, v)| v.clone())
-                            .unwrap_or(Value::Null)
-                    })
-                    .collect();
-                ColumnData::new(name.clone(), values)
-            })
+            .map(|name| ColumnData::new(name.clone(), Vec::with_capacity(ids.len())))
             .collect();
+        let mut index: HashMap<&str, usize> = HashMap::new();
+        for (idx, name) in field_names.iter().enumerate() {
+            index.insert(name.as_str(), idx);
+        }
+
+        for (row_idx, mut row) in rows.into_iter().enumerate() {
+            for column in columns.iter_mut() {
+                column.values.push(Value::Null);
+            }
+
+            for (name, value) in row.fields.drain(..) {
+                if let Some(&col_idx) = index.get(name.as_str()) {
+                    columns[col_idx].values[row_idx] = value;
+                }
+            }
+        }
 
         EntityBlock::with_data(entity_type, ids, columns)
     }
@@ -1004,6 +1144,22 @@ impl<'a> QueryExecutor<'a> {
         source_ids: &[[u8; 16]],
         include: &IncludePlan,
     ) -> Result<(Vec<EntityRow>, Vec<Edge>), Error> {
+        if let Some((mut rows, edges)) = self.resolve_include_via_index(source_ids, include)? {
+            self.sort_rows(&mut rows, &include.order_by);
+
+            if let Some(pagination) = &include.pagination {
+                let source_id_set: HashSet<[u8; 16]> = source_ids.iter().cloned().collect();
+                return Ok(self.apply_per_parent_pagination(
+                    &rows,
+                    &edges,
+                    &source_id_set,
+                    pagination,
+                ));
+            }
+
+            return Ok((rows, edges));
+        }
+
         // Select join strategy based on cardinality
         // For now, use a simple heuristic based on parent count
         // TODO: Use statistics for better estimation of child count
@@ -1032,6 +1188,80 @@ impl<'a> QueryExecutor<'a> {
         }
 
         Ok((rows, edges))
+    }
+
+    fn resolve_include_via_index(
+        &self,
+        source_ids: &[[u8; 16]],
+        include: &IncludePlan,
+    ) -> Result<Option<(Vec<EntityRow>, Vec<Edge>)>, Error> {
+        let relation = &include.relation;
+        if relation.edge_entity.is_some() {
+            return Ok(None);
+        }
+
+        let target_entity = &relation.to_entity;
+        let fk_field = &relation.to_field;
+
+        let use_hash = self.storage.hash_index().has_index(target_entity, fk_field)?;
+        let mut use_btree = false;
+
+        if !use_hash {
+            use_btree = self
+                .storage
+                .ensure_btree_index(target_entity, fk_field)?;
+        }
+
+        if !use_hash && !use_btree {
+            return Ok(None);
+        }
+
+        let btree = if use_btree {
+            self.storage.btree_index()
+        } else {
+            None
+        };
+
+        let needed_fields = self.collect_needed_fields_for_include(include);
+
+        let mut rows = Vec::new();
+        let mut edges = Vec::new();
+
+        if use_hash {
+            self.record_access_path(AccessPath::HashIndex);
+        } else if use_btree {
+            self.record_access_path(AccessPath::BfTree);
+        }
+
+        for &parent_id in source_ids {
+            let lookup_value = Value::Uuid(parent_id);
+            let child_ids = if use_hash {
+                self.storage
+                    .hash_index()
+                    .lookup(target_entity, fk_field, &lookup_value)?
+            } else if let Some(btree) = btree {
+                btree.scan_equal(target_entity, fk_field, &lookup_value)?
+            } else {
+                Vec::new()
+            };
+
+            for child_id in child_ids {
+                if let Some((_version, record)) = self.storage.get_latest(&child_id)? {
+                    let fields = self.decode_record_fields(&record.data, needed_fields.as_ref())?;
+
+                    if let Some(filter) = &include.filter {
+                        if !FilterEvaluator::evaluate(filter, &fields)? {
+                            continue;
+                        }
+                    }
+
+                    rows.push(EntityRow { id: child_id, fields });
+                    edges.push(Edge::new(parent_id, child_id));
+                }
+            }
+        }
+
+        Ok(Some((rows, edges)))
     }
 
     /// Apply pagination per parent entity.
@@ -1093,6 +1323,7 @@ impl<'a> QueryExecutor<'a> {
 mod tests {
     use super::*;
     use crate::catalog::{EntityDef, FieldDef, FieldType, RelationDef, ScalarType, SchemaBundle};
+    use crate::metrics::new_shared_registry;
     use crate::storage::{Record, StorageConfig, VersionedKey};
     use super::super::value_codec::encode_entity;
 
@@ -1149,6 +1380,13 @@ mod tests {
         let key = VersionedKey::now(id);
         db.storage
             .put_typed("User", key, Record::new(data))
+            .unwrap();
+    }
+
+    fn index_user_name(db: &TestDb, id: [u8; 16], name: &str) {
+        db.storage
+            .hash_index()
+            .insert("User", "name", &Value::String(name.to_string()), id)
             .unwrap();
     }
 
@@ -1295,6 +1533,30 @@ mod tests {
     }
 
     #[test]
+    fn test_query_with_projection_and_order_by() {
+        let db = setup_test_db();
+
+        let user1_id = StorageEngine::generate_id();
+        let user2_id = StorageEngine::generate_id();
+        insert_user(&db, user1_id, "Alice", 30);
+        insert_user(&db, user2_id, "Bob", 20);
+
+        db.storage.flush().unwrap();
+
+        let executor = QueryExecutor::new(&db.storage, &db.catalog);
+
+        let query = GraphQuery::new("User")
+            .with_fields(vec!["name".into()])
+            .with_order(ormdb_proto::OrderSpec::asc("age"));
+
+        let result = executor.execute(&query).unwrap();
+
+        let name_col = result.entities[0].column("name").unwrap();
+        assert_eq!(name_col.values[0], Value::String("Bob".to_string()));
+        assert_eq!(name_col.values[1], Value::String("Alice".to_string()));
+    }
+
+    #[test]
     fn test_query_with_include() {
         let db = setup_test_db();
 
@@ -1364,5 +1626,60 @@ mod tests {
         assert_eq!(result.entities[0].len(), 1);
         let name_col = result.entities[0].column("name").unwrap();
         assert_eq!(name_col.values[0], Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_access_path_metrics() {
+        let db = setup_test_db();
+
+        let user1_id = StorageEngine::generate_id();
+        let user2_id = StorageEngine::generate_id();
+        insert_user(&db, user1_id, "Alice", 30);
+        insert_user(&db, user2_id, "Bob", 25);
+        index_user_name(&db, user1_id, "Alice");
+        index_user_name(&db, user2_id, "Bob");
+
+        db.storage.flush().unwrap();
+
+        let registry = new_shared_registry();
+        let executor = QueryExecutor::with_metrics(&db.storage, &db.catalog, registry.clone());
+
+        let (hash0, btree0, columnar0, row0) = registry.access_path_counts();
+
+        let query = GraphQuery::new("User")
+            .with_filter(ormdb_proto::FilterExpr::eq("name", Value::String("Alice".to_string())).into());
+        executor.execute(&query).unwrap();
+        let (hash1, btree1, columnar1, row1) = registry.access_path_counts();
+        assert_eq!(hash1, hash0 + 1);
+        assert_eq!(btree1, btree0);
+        assert_eq!(columnar1, columnar0);
+        assert_eq!(row1, row0);
+
+        assert!(db.storage.btree_index().is_some());
+        let query = GraphQuery::new("User")
+            .with_filter(ormdb_proto::FilterExpr::gt("age", Value::Int32(20)).into());
+        executor.execute(&query).unwrap();
+        let (hash2, btree2, columnar2, row2) = registry.access_path_counts();
+        assert_eq!(hash2, hash1);
+        assert_eq!(btree2, btree1 + 1);
+        assert_eq!(columnar2, columnar1);
+        assert_eq!(row2, row1);
+
+        let query = GraphQuery::new("User")
+            .with_filter(ormdb_proto::FilterExpr::like("name", "A%").into());
+        executor.execute(&query).unwrap();
+        let (hash3, btree3, columnar3, row3) = registry.access_path_counts();
+        assert_eq!(hash3, hash2);
+        assert_eq!(btree3, btree2);
+        assert_eq!(columnar3, columnar2 + 1);
+        assert_eq!(row3, row2);
+
+        let query = GraphQuery::new("User");
+        executor.execute(&query).unwrap();
+        let (hash4, btree4, columnar4, row4) = registry.access_path_counts();
+        assert_eq!(hash4, hash3);
+        assert_eq!(btree4, btree3);
+        assert_eq!(columnar4, columnar3);
+        assert_eq!(row4, row3 + 1);
     }
 }

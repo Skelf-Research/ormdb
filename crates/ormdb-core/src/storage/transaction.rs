@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::{Record, StorageEngine, VersionedKey};
 use crate::error::Error;
+use crate::query::decode_entity;
 use sled::transaction::{ConflictableTransactionError, TransactionalTree};
 use sled::Transactional;
 
@@ -38,6 +39,13 @@ pub enum TransactionOp {
         /// New record data.
         record: Record,
     },
+}
+
+#[derive(Debug, Clone)]
+struct IndexWork {
+    entity_type: String,
+    before: Option<Vec<u8>>,
+    after: Option<Vec<u8>>,
 }
 
 /// A transaction for atomic multi-key operations.
@@ -243,6 +251,8 @@ impl<'a> Transaction<'a> {
             return Ok(());
         }
 
+        let index_work = self.collect_index_work()?;
+
         let data_tree = self.engine.data_tree();
         let meta_tree = self.engine.meta_tree();
         let type_index_tree = self.engine.type_index_tree();
@@ -287,7 +297,10 @@ impl<'a> Transaction<'a> {
             });
 
         match result {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.apply_index_updates(index_work)?;
+                Ok(())
+            }
             Err(sled::transaction::TransactionError::Abort(e)) => Err(e),
             Err(sled::transaction::TransactionError::Storage(e)) => Err(Error::Storage(e)),
         }
@@ -309,6 +322,110 @@ impl<'a> Transaction<'a> {
                 });
             }
         }
+        Ok(())
+    }
+
+    fn collect_index_work(&self) -> Result<HashMap<[u8; 16], IndexWork>, Error> {
+        let mut work: HashMap<[u8; 16], IndexWork> = HashMap::new();
+
+        for op in &self.ops {
+            let (entity_type, entity_id, after) = match op {
+                TransactionOp::Put {
+                    entity_type,
+                    key,
+                    record,
+                } => (entity_type.as_str(), key.entity_id, Some(record.data.clone())),
+                TransactionOp::Update {
+                    entity_type,
+                    entity_id,
+                    record,
+                } => (entity_type.as_str(), *entity_id, Some(record.data.clone())),
+                TransactionOp::Delete {
+                    entity_type,
+                    entity_id,
+                } => (entity_type.as_str(), *entity_id, None),
+            };
+
+            if entity_type.is_empty() {
+                continue;
+            }
+
+            if let Some(entry) = work.get_mut(&entity_id) {
+                entry.entity_type = entity_type.to_string();
+                entry.after = after;
+                continue;
+            }
+
+            let before = self
+                .engine
+                .get_latest(&entity_id)?
+                .map(|(_, record)| record.data);
+
+            work.insert(
+                entity_id,
+                IndexWork {
+                    entity_type: entity_type.to_string(),
+                    before,
+                    after,
+                },
+            );
+        }
+
+        Ok(work)
+    }
+
+    fn apply_index_updates(
+        &self,
+        work: HashMap<[u8; 16], IndexWork>,
+    ) -> Result<(), Error> {
+        for (entity_id, entry) in work {
+            let mut before_fields = None;
+            if let Some(data) = entry.before.as_ref() {
+                match decode_entity(data) {
+                    Ok(fields) => {
+                        before_fields = Some(fields);
+                    }
+                    Err(_) => {
+                        if entry.after.is_none() {
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            let mut after_fields = None;
+            if let Some(data) = entry.after.as_ref() {
+                match decode_entity(data) {
+                    Ok(fields) => {
+                        after_fields = Some(fields);
+                    }
+                    Err(_) => {
+                        continue;
+                    }
+                }
+            }
+
+            let btree_columns = self
+                .engine
+                .btree_indexed_columns_for_entity(&entry.entity_type);
+
+            self.engine.update_secondary_indexes_from_fields(
+                &entry.entity_type,
+                entity_id,
+                before_fields.as_deref(),
+                after_fields.as_deref(),
+                &btree_columns,
+            )?;
+
+            if let Some(fields) = after_fields.as_ref() {
+                self.engine.update_columnar_row_from_fields(
+                    &entry.entity_type,
+                    entity_id,
+                    fields,
+                )?;
+            }
+        }
+
         Ok(())
     }
 
@@ -385,7 +502,9 @@ impl StorageEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::encode_entity;
     use crate::storage::StorageConfig;
+    use ormdb_proto::Value;
 
     fn test_engine() -> StorageEngine {
         StorageEngine::open(StorageConfig::temporary()).unwrap()
@@ -645,5 +764,112 @@ mod tests {
         // Read should return None for deleted entity
         assert!(tx.read(&entity_id).unwrap().is_none());
         assert!(!tx.exists(&entity_id).unwrap());
+    }
+
+    #[test]
+    fn test_transaction_updates_indexes_and_columnar() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = StorageEngine::open(StorageConfig::new(dir.path())).unwrap();
+
+        let btree_ready = engine.ensure_btree_index("User", "age").unwrap();
+        assert!(btree_ready);
+
+        let entity_id = StorageEngine::generate_id();
+
+        let initial_fields = vec![
+            ("id".to_string(), Value::Uuid(entity_id)),
+            ("name".to_string(), Value::String("Alice".to_string())),
+            ("age".to_string(), Value::Int32(30)),
+        ];
+        let initial_data = encode_entity(&initial_fields).unwrap();
+
+        let mut tx = engine.transaction();
+        tx.insert("User", entity_id, Record::new(initial_data));
+        tx.commit().unwrap();
+
+        let name_ids = engine
+            .hash_index()
+            .lookup("User", "name", &Value::String("Alice".to_string()))
+            .unwrap();
+        assert_eq!(name_ids, vec![entity_id]);
+
+        let age_ids = engine
+            .btree_index()
+            .unwrap()
+            .scan_equal("User", "age", &Value::Int32(30))
+            .unwrap();
+        assert_eq!(age_ids, vec![entity_id]);
+
+        let projection = engine.columnar().projection("User").unwrap();
+        assert_eq!(
+            projection.get_column(&entity_id, "name").unwrap(),
+            Some(Value::String("Alice".to_string()))
+        );
+        assert_eq!(
+            projection.get_column(&entity_id, "age").unwrap(),
+            Some(Value::Int32(30))
+        );
+
+        let updated_fields = vec![
+            ("id".to_string(), Value::Uuid(entity_id)),
+            ("name".to_string(), Value::String("Bob".to_string())),
+            ("age".to_string(), Value::Int32(31)),
+        ];
+        let updated_data = encode_entity(&updated_fields).unwrap();
+
+        let mut tx = engine.transaction();
+        tx.update("User", entity_id, Record::new(updated_data));
+        tx.commit().unwrap();
+
+        let old_name_ids = engine
+            .hash_index()
+            .lookup("User", "name", &Value::String("Alice".to_string()))
+            .unwrap();
+        assert!(old_name_ids.is_empty());
+        let new_name_ids = engine
+            .hash_index()
+            .lookup("User", "name", &Value::String("Bob".to_string()))
+            .unwrap();
+        assert_eq!(new_name_ids, vec![entity_id]);
+
+        let old_age_ids = engine
+            .btree_index()
+            .unwrap()
+            .scan_equal("User", "age", &Value::Int32(30))
+            .unwrap();
+        assert!(old_age_ids.is_empty());
+        let new_age_ids = engine
+            .btree_index()
+            .unwrap()
+            .scan_equal("User", "age", &Value::Int32(31))
+            .unwrap();
+        assert_eq!(new_age_ids, vec![entity_id]);
+
+        assert_eq!(
+            projection.get_column(&entity_id, "name").unwrap(),
+            Some(Value::String("Bob".to_string()))
+        );
+        assert_eq!(
+            projection.get_column(&entity_id, "age").unwrap(),
+            Some(Value::Int32(31))
+        );
+
+        let mut tx = engine.transaction();
+        tx.delete_typed("User", entity_id);
+        tx.commit().unwrap();
+
+        let deleted_name_ids = engine
+            .hash_index()
+            .lookup("User", "name", &Value::String("Bob".to_string()))
+            .unwrap();
+        assert!(deleted_name_ids.is_empty());
+        let deleted_age_ids = engine
+            .btree_index()
+            .unwrap()
+            .scan_equal("User", "age", &Value::Int32(31))
+            .unwrap();
+        assert!(deleted_age_ids.is_empty());
+        assert_eq!(projection.get_column(&entity_id, "name").unwrap(), None);
+        assert_eq!(projection.get_column(&entity_id, "age").unwrap(), None);
     }
 }

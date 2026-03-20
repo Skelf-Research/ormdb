@@ -65,12 +65,42 @@ impl ReplicaApplier {
         let key = VersionedKey::new(entry.entity_id, entry.timestamp);
 
         self.storage.put_typed(&entry.entity_type, key, record)?;
+        if matches!(entry.change_type, ChangeType::Update) && entry.before_data.is_none() {
+            return Err(Error::InvalidData(
+                "update entry missing before_data".to_string(),
+            ));
+        }
+
+        let btree_columns = self
+            .storage
+            .btree_indexed_columns_for_entity(&entry.entity_type);
+        self.storage.update_secondary_indexes_from_encoded(
+            &entry.entity_type,
+            entry.entity_id,
+            entry.before_data.as_deref(),
+            Some(data),
+            &btree_columns,
+        )?;
         Ok(())
     }
 
     /// Apply a delete entry.
     fn apply_delete(&self, entry: &ChangeLogEntry) -> Result<(), Error> {
+        let before = entry.before_data.as_ref().ok_or_else(|| {
+            Error::InvalidData("delete entry missing before_data".to_string())
+        })?;
+
         self.storage.delete_typed(&entry.entity_type, &entry.entity_id)?;
+        let btree_columns = self
+            .storage
+            .btree_indexed_columns_for_entity(&entry.entity_type);
+        self.storage.update_secondary_indexes_from_encoded(
+            &entry.entity_type,
+            entry.entity_id,
+            Some(before),
+            None,
+            &btree_columns,
+        )?;
         Ok(())
     }
 
@@ -98,7 +128,9 @@ impl ReplicaApplier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::encode_entity;
     use crate::storage::StorageConfig;
+    use ormdb_proto::Value;
 
     fn setup_storage() -> (tempfile::TempDir, Arc<StorageEngine>) {
         let dir = tempfile::tempdir().unwrap();
@@ -154,6 +186,15 @@ mod tests {
             after_data: None,
             schema_version: 1,
         }
+    }
+
+    fn encode_user(entity_id: [u8; 16], name: &str, age: i32) -> Vec<u8> {
+        let fields = vec![
+            ("id".to_string(), Value::Uuid(entity_id)),
+            ("name".to_string(), Value::String(name.to_string())),
+            ("age".to_string(), Value::Int32(age)),
+        ];
+        encode_entity(&fields).unwrap()
     }
 
     #[test]
@@ -264,5 +305,96 @@ mod tests {
 
         let last_lsn = applier.apply_batch(&[]).unwrap();
         assert_eq!(last_lsn, 50); // Returns initial LSN for empty batch
+    }
+
+    #[test]
+    fn test_apply_updates_indexes_and_columnar() {
+        let (_dir, storage) = setup_storage();
+        let applier = ReplicaApplier::new(storage.clone());
+
+        let btree_ready = storage.ensure_btree_index("User", "age").unwrap();
+        assert!(btree_ready);
+
+        let entity_id = [7u8; 16];
+        let initial_data = encode_user(entity_id, "Alice", 30);
+        let insert = create_insert_entry("User", entity_id, initial_data.clone(), 1);
+        applier.apply(&insert).unwrap();
+
+        let name_ids = storage
+            .hash_index()
+            .lookup("User", "name", &Value::String("Alice".to_string()))
+            .unwrap();
+        assert_eq!(name_ids, vec![entity_id]);
+
+        let age_ids = storage
+            .btree_index()
+            .unwrap()
+            .scan_equal("User", "age", &Value::Int32(30))
+            .unwrap();
+        assert_eq!(age_ids, vec![entity_id]);
+
+        let projection = storage.columnar().projection("User").unwrap();
+        assert_eq!(
+            projection.get_column(&entity_id, "name").unwrap(),
+            Some(Value::String("Alice".to_string()))
+        );
+        assert_eq!(
+            projection.get_column(&entity_id, "age").unwrap(),
+            Some(Value::Int32(30))
+        );
+
+        let updated_data = encode_user(entity_id, "Bob", 31);
+        let update = create_update_entry("User", entity_id, initial_data, updated_data.clone(), 2);
+        applier.apply(&update).unwrap();
+
+        let old_name_ids = storage
+            .hash_index()
+            .lookup("User", "name", &Value::String("Alice".to_string()))
+            .unwrap();
+        assert!(old_name_ids.is_empty());
+        let new_name_ids = storage
+            .hash_index()
+            .lookup("User", "name", &Value::String("Bob".to_string()))
+            .unwrap();
+        assert_eq!(new_name_ids, vec![entity_id]);
+
+        let old_age_ids = storage
+            .btree_index()
+            .unwrap()
+            .scan_equal("User", "age", &Value::Int32(30))
+            .unwrap();
+        assert!(old_age_ids.is_empty());
+        let new_age_ids = storage
+            .btree_index()
+            .unwrap()
+            .scan_equal("User", "age", &Value::Int32(31))
+            .unwrap();
+        assert_eq!(new_age_ids, vec![entity_id]);
+
+        assert_eq!(
+            projection.get_column(&entity_id, "name").unwrap(),
+            Some(Value::String("Bob".to_string()))
+        );
+        assert_eq!(
+            projection.get_column(&entity_id, "age").unwrap(),
+            Some(Value::Int32(31))
+        );
+
+        let delete = create_delete_entry("User", entity_id, updated_data, 3);
+        applier.apply(&delete).unwrap();
+
+        let deleted_name_ids = storage
+            .hash_index()
+            .lookup("User", "name", &Value::String("Bob".to_string()))
+            .unwrap();
+        assert!(deleted_name_ids.is_empty());
+        let deleted_age_ids = storage
+            .btree_index()
+            .unwrap()
+            .scan_equal("User", "age", &Value::Int32(31))
+            .unwrap();
+        assert!(deleted_age_ids.is_empty());
+        assert_eq!(projection.get_column(&entity_id, "name").unwrap(), None);
+        assert_eq!(projection.get_column(&entity_id, "age").unwrap(), None);
     }
 }

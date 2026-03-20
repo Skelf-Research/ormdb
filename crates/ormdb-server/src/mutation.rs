@@ -154,6 +154,8 @@ impl<'a> MutationExecutor<'a> {
             .storage()
             .put_typed(entity, key, Record::new(encoded.clone()))
             .map_err(|e| Error::Storage(e))?;
+        self.database.statistics().increment(entity);
+        self.update_secondary_indexes(entity, id, None, Some(&encoded))?;
 
         Ok((id, encoded))
     }
@@ -252,6 +254,7 @@ impl<'a> MutationExecutor<'a> {
             .storage()
             .put_typed(entity, key, Record::new(encoded.clone()))
             .map_err(|e| Error::Storage(e))?;
+        self.update_secondary_indexes(entity, *id, Some(&before_data), Some(&encoded))?;
 
         Ok((before_data, encoded, changed_fields))
     }
@@ -312,6 +315,8 @@ impl<'a> MutationExecutor<'a> {
             .storage()
             .delete_typed(entity, id)
             .map_err(|e| Error::Storage(e))?;
+        self.database.statistics().decrement(entity);
+        self.update_secondary_indexes(entity, *id, Some(&before_data), None)?;
 
         Ok(Some(before_data))
     }
@@ -443,8 +448,183 @@ impl<'a> MutationExecutor<'a> {
             .storage()
             .put_typed(entity, key, Record::new(encoded.clone()))
             .map_err(|e| Error::Storage(e))?;
+        self.database.statistics().increment(entity);
+        self.update_secondary_indexes(entity, id, None, Some(&encoded))?;
 
         Ok(encoded)
+    }
+
+    fn update_secondary_indexes(
+        &self,
+        entity: &str,
+        entity_id: [u8; 16],
+        before: Option<&[u8]>,
+        after: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        let before_fields = if let Some(data) = before {
+            Some(decode_entity(data).map_err(|e| {
+                Error::Database(format!("failed to decode entity: {}", e))
+            })?)
+        } else {
+            None
+        };
+
+        let after_fields = if let Some(data) = after {
+            Some(decode_entity(data).map_err(|e| {
+                Error::Database(format!("failed to decode entity: {}", e))
+            })?)
+        } else {
+            None
+        };
+
+        self.update_hash_indexes(entity, entity_id, &before_fields, &after_fields)?;
+        self.update_btree_indexes(entity, entity_id, &before_fields, &after_fields)?;
+
+        if after.is_none() {
+            self.delete_columnar_row(entity, entity_id)?;
+        }
+
+        Ok(())
+    }
+
+    fn update_hash_indexes(
+        &self,
+        entity: &str,
+        entity_id: [u8; 16],
+        before_fields: &Option<Vec<(String, Value)>>,
+        after_fields: &Option<Vec<(String, Value)>>,
+    ) -> Result<(), Error> {
+        use std::collections::{HashMap, HashSet};
+
+        let to_map = |fields: &Option<Vec<(String, Value)>>| -> HashMap<String, Value> {
+            fields
+                .as_ref()
+                .map(|items| items.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default()
+        };
+
+        let before_map = to_map(before_fields);
+        let after_map = to_map(after_fields);
+
+        let mut names: HashSet<String> = HashSet::new();
+        names.extend(before_map.keys().cloned());
+        names.extend(after_map.keys().cloned());
+
+        let hash_index = self.database.storage().hash_index();
+
+        for name in names {
+            let before_value = before_map.get(&name);
+            let after_value = after_map.get(&name);
+
+            if before_value == after_value {
+                continue;
+            }
+
+            if let Some(value) = before_value {
+                if !matches!(value, Value::Null) {
+                    hash_index.remove(entity, &name, value, entity_id)?;
+                }
+            }
+
+            if let Some(value) = after_value {
+                if !matches!(value, Value::Null) {
+                    hash_index.insert(entity, &name, value, entity_id)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn update_btree_indexes(
+        &self,
+        entity: &str,
+        entity_id: [u8; 16],
+        before_fields: &Option<Vec<(String, Value)>>,
+        after_fields: &Option<Vec<(String, Value)>>,
+    ) -> Result<(), Error> {
+        use std::collections::{HashMap, HashSet};
+
+        let Some(btree) = self.database.storage().btree_index() else {
+            return Ok(());
+        };
+
+        let to_map = |fields: &Option<Vec<(String, Value)>>| -> HashMap<String, Value> {
+            fields
+                .as_ref()
+                .map(|items| items.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default()
+        };
+
+        let before_map = to_map(before_fields);
+        let after_map = to_map(after_fields);
+
+        let mut columns: HashSet<String> = HashSet::new();
+        columns.extend(self.database.storage().btree_indexed_columns_for_entity(entity));
+
+        let relations = self
+            .database
+            .catalog()
+            .relations_to(entity)
+            .map_err(|e| Error::Database(format!("failed to load relations: {}", e)))?;
+        for relation in relations {
+            columns.insert(relation.to_field.clone());
+        }
+
+        for column in columns {
+            let before_value = before_map.get(&column);
+            let after_value = after_map.get(&column);
+
+            if before_value == after_value {
+                continue;
+            }
+
+            if let Some(value) = before_value {
+                if !matches!(value, Value::Null) {
+                    btree.remove(entity, &column, value, entity_id)?;
+                }
+            }
+
+            if let Some(value) = after_value {
+                if !matches!(value, Value::Null) {
+                    btree.insert(entity, &column, value, entity_id)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn delete_columnar_row(
+        &self,
+        entity: &str,
+        entity_id: [u8; 16],
+    ) -> Result<(), Error> {
+        let entity_def = self
+            .database
+            .catalog()
+            .get_entity(entity)
+            .map_err(|e| Error::Database(format!("failed to load entity: {}", e)))?
+            .ok_or_else(|| Error::Database(format!("entity '{}' not found", entity)))?;
+
+        let columns: Vec<&str> = entity_def
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect();
+
+        let projection = self
+            .database
+            .storage()
+            .columnar()
+            .projection(entity)
+            .map_err(|e| Error::Database(format!("failed to load columnar projection: {}", e)))?;
+
+        projection
+            .delete_row(&entity_id, &columns)
+            .map_err(|e| Error::Database(format!("failed to delete columnar row: {}", e)))?;
+
+        Ok(())
     }
 }
 

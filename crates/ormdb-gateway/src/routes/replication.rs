@@ -21,7 +21,8 @@ pub fn routes() -> Router<AppState> {
 async fn handle_get_status(
     State(state): State<AppState>,
 ) -> Result<Json<ReplicationStatusResponse>, AppError> {
-    let status = state.client.get_replication_status().await?;
+    let pool = state.pool.clone();
+    let status = state.execute_read(|| pool.get_replication_status()).await?;
     Ok(Json(status.into()))
 }
 
@@ -50,10 +51,12 @@ async fn handle_stream_changes(
     let entity_filter = params.entities.map(|s| {
         s.split(',').map(|e| e.trim().to_string()).collect()
     });
+    let from_lsn = params.from_lsn;
+    let limit = params.limit;
+    let pool = state.pool.clone();
 
     let response = state
-        .client
-        .stream_changes(params.from_lsn, params.limit, entity_filter)
+        .execute_read(|| pool.stream_changes(from_lsn, limit, entity_filter.clone()))
         .await?;
 
     let entries: Vec<ChangeLogEntryJson> = response

@@ -4,14 +4,14 @@
 //! - NestedLoop: Simple O(N*M) approach for small datasets
 //! - HashJoin: Efficient O(N+M) approach using hash table lookups
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::Error;
 use crate::storage::StorageEngine;
 
-use super::filter::FilterEvaluator;
+use super::filter::{extract_filter_fields, FilterEvaluator};
 use super::planner::IncludePlan;
-use super::value_codec::decode_entity;
+use super::value_codec::{decode_entity, decode_entity_projected};
 
 use ormdb_proto::{Edge, Value};
 
@@ -75,6 +75,7 @@ impl HashJoinExecutor {
         let relation = &include.relation;
         let target_entity = &relation.to_entity;
         let fk_field = &relation.to_field;
+        let needed_fields = collect_needed_fields(include, fk_field);
 
         // Build phase: scan child entities and build FK -> entities map
         let mut fk_to_entities: HashMap<[u8; 16], Vec<EntityRow>> = HashMap::new();
@@ -83,7 +84,10 @@ impl HashJoinExecutor {
             let (entity_id, _version_ts, record) = result?;
 
             // Decode the entity data
-            let fields = decode_entity(&record.data)?;
+            let fields = match needed_fields.as_ref() {
+                Some(fields) => decode_entity_projected(&record.data, fields)?,
+                None => decode_entity(&record.data)?,
+            };
 
             // Get foreign key value
             let fk_value = fields
@@ -116,10 +120,11 @@ impl HashJoinExecutor {
         let mut edges = Vec::new();
 
         for &parent_id in source_ids {
-            if let Some(children) = fk_to_entities.get(&parent_id) {
+            if let Some(children) = fk_to_entities.remove(&parent_id) {
                 for child in children {
-                    rows.push(child.clone());
-                    edges.push(Edge::new(parent_id, child.id));
+                    let child_id = child.id;
+                    rows.push(child);
+                    edges.push(Edge::new(parent_id, child_id));
                 }
             }
         }
@@ -147,11 +152,10 @@ impl NestedLoopExecutor {
         source_ids: &[[u8; 16]],
         include: &IncludePlan,
     ) -> Result<(Vec<EntityRow>, Vec<Edge>), Error> {
-        use std::collections::HashSet;
-
         let relation = &include.relation;
         let target_entity = &relation.to_entity;
         let fk_field = &relation.to_field;
+        let needed_fields = collect_needed_fields(include, fk_field);
 
         // Create set for O(1) lookup
         let source_id_set: HashSet<[u8; 16]> = source_ids.iter().cloned().collect();
@@ -164,7 +168,10 @@ impl NestedLoopExecutor {
             let (entity_id, _version_ts, record) = result?;
 
             // Decode the entity data
-            let fields = decode_entity(&record.data)?;
+            let fields = match needed_fields.as_ref() {
+                Some(fields) => decode_entity_projected(&record.data, fields)?,
+                None => decode_entity(&record.data)?,
+            };
 
             // Get the foreign key value
             let fk_value = fields
@@ -199,6 +206,28 @@ impl NestedLoopExecutor {
 
         Ok((rows, edges))
     }
+}
+
+fn collect_needed_fields(
+    include: &IncludePlan,
+    fk_field: &str,
+) -> Option<HashSet<String>> {
+    if include.fields.is_empty() {
+        return None;
+    }
+
+    let mut fields: HashSet<String> = include.fields.iter().cloned().collect();
+    fields.insert(fk_field.to_string());
+
+    if let Some(filter) = &include.filter {
+        fields.extend(extract_filter_fields(filter));
+    }
+
+    for order in &include.order_by {
+        fields.insert(order.field.clone());
+    }
+
+    Some(fields)
 }
 
 /// Execute a join using the specified strategy.
