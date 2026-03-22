@@ -44,8 +44,8 @@ rand = "0.8"
 rusqlite = { version = "0.31", features = ["bundled"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
 
-# Internal
-ormdb-core = { path = "crates/ormdb-core" }
-ormdb-proto = { path = "crates/ormdb-proto" }
-ormdb-client = { path = "crates/ormdb-client" }
-ormdb-lang = { path = "crates/ormdb-lang" }
+# Internal crates (path for local dev, version for publishing)
+ormdb-core = { version = "0.1.0", path = "crates/ormdb-core" }
+ormdb-proto = { version = "0.1.0", path = "crates/ormdb-proto" }
+ormdb-client = { version = "0.1.0", path = "crates/ormdb-client" }
+ormdb-lang = { version = "0.1.0", path = "crates/ormdb-lang" }

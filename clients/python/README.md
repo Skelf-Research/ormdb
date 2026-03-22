@@ -1,6 +1,9 @@
 # ORMDB Python Client
 
-A Python client library for ORMDB with support for SQLAlchemy and Django ORM.
+[![PyPI](https://img.shields.io/pypi/v/ormdb.svg)](https://pypi.org/project/ormdb/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
+
+A Python client library for [ORMDB](https://github.com/Skelf-Research/ormdb) with support for SQLAlchemy and Django ORM.
 
 ## Installation
 
@@ -209,4 +212,6 @@ except ConnectionError as e:
 
 ## License
 
-MIT
+MIT License - see [LICENSE](../../LICENSE) for details.
+
+Part of the [ORMDB](https://github.com/Skelf-Research/ormdb) project.
