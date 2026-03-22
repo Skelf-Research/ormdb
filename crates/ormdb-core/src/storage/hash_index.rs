@@ -2,7 +2,17 @@
 //!
 //! This module provides a hash-based secondary index that maps field values
 //! to entity IDs, enabling O(1) lookups for equality filters.
+//!
+//! ## Optimizations
+//!
+//! - **has_index cache**: Caches results of `has_index()` checks to avoid
+//!   expensive prefix scans on every query.
+//! - **lookup cache**: LRU-style cache for hot lookup results to reduce
+//!   disk I/O for frequently accessed values.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use dashmap::DashMap;
 use sled::Db;
 
 use crate::error::Error;
@@ -10,6 +20,9 @@ use ormdb_proto::Value;
 
 /// Tree name prefix for hash indexes.
 pub const HASH_INDEX_TREE_PREFIX: &str = "index:hash:";
+
+/// Maximum number of lookup results to cache.
+const LOOKUP_CACHE_MAX_ENTRIES: usize = 10_000;
 
 /// Hash index for efficient equality lookups.
 ///
@@ -20,12 +33,25 @@ pub const HASH_INDEX_TREE_PREFIX: &str = "index:hash:";
 /// Value format: `[entity_id_1:16][entity_id_2:16]...` (packed 16-byte IDs)
 pub struct HashIndex {
     db: Db,
+    /// Cache for has_index checks: (entity_type, column_name) -> exists
+    /// Avoids expensive prefix scans on every query.
+    has_index_cache: DashMap<(String, String), bool>,
+    /// Cache for lookup results: full_key -> entity_ids
+    /// Provides O(1) lookups for hot values without disk I/O.
+    lookup_cache: DashMap<Vec<u8>, Vec<[u8; 16]>>,
+    /// Counter for cache eviction (simple clock-based eviction)
+    lookup_cache_ops: AtomicU64,
 }
 
 impl HashIndex {
     /// Open or create a hash index.
     pub fn open(db: &Db) -> Result<Self, Error> {
-        Ok(Self { db: db.clone() })
+        Ok(Self {
+            db: db.clone(),
+            has_index_cache: DashMap::new(),
+            lookup_cache: DashMap::new(),
+            lookup_cache_ops: AtomicU64::new(0),
+        })
     }
 
     /// Get the sled tree for a specific entity type.
@@ -136,10 +162,82 @@ impl HashIndex {
         // Check if already present (avoid duplicates)
         if !ids.contains(&entity_id) {
             ids.push(entity_id);
-            tree.insert(key, Self::encode_id_list(&ids))?;
+            tree.insert(&key, Self::encode_id_list(&ids))?;
+
+            // Update caches
+            self.has_index_cache
+                .insert((entity_type.to_string(), column_name.to_string()), true);
+            // Invalidate lookup cache for this key (data changed)
+            let full_key = self.build_full_key(entity_type, &key);
+            self.lookup_cache.remove(&full_key);
         }
 
         Ok(())
+    }
+
+    /// Build a full cache key including entity type.
+    fn build_full_key(&self, entity_type: &str, key: &[u8]) -> Vec<u8> {
+        let mut full_key = Vec::with_capacity(entity_type.len() + 1 + key.len());
+        full_key.extend_from_slice(entity_type.as_bytes());
+        full_key.push(0x00);
+        full_key.extend_from_slice(key);
+        full_key
+    }
+
+    /// Batch insert multiple entity IDs for efficient bulk loading.
+    ///
+    /// Groups insertions by value and performs one read-modify-write per unique value,
+    /// reducing O(n^2) to O(n) complexity for bulk operations.
+    pub fn insert_batch(
+        &self,
+        entity_type: &str,
+        column_name: &str,
+        values_and_ids: impl IntoIterator<Item = (Value, [u8; 16])>,
+    ) -> Result<usize, Error> {
+        use std::collections::{HashMap, HashSet};
+
+        // Group IDs by value key
+        let mut groups: HashMap<Vec<u8>, Vec<[u8; 16]>> = HashMap::new();
+        for (value, id) in values_and_ids {
+            let key = Self::build_key(column_name, &value);
+            groups.entry(key).or_default().push(id);
+        }
+
+        if groups.is_empty() {
+            return Ok(0);
+        }
+
+        let tree = self.tree_for_entity(entity_type)?;
+        let mut total_inserted = 0;
+
+        // For each unique value, read once, merge, write once
+        for (key, new_ids) in &groups {
+            // Read existing IDs into HashSet for O(1) dedup
+            let mut id_set: HashSet<[u8; 16]> = match tree.get(key)? {
+                Some(bytes) => Self::decode_id_list(&bytes).into_iter().collect(),
+                None => HashSet::new(),
+            };
+
+            // Merge new IDs (HashSet handles dedup automatically)
+            let before_len = id_set.len();
+            id_set.extend(new_ids.iter().copied());
+            total_inserted += id_set.len() - before_len;
+
+            // Write back as Vec (sorted for determinism)
+            let mut ids: Vec<_> = id_set.into_iter().collect();
+            ids.sort_unstable();
+            tree.insert(key, Self::encode_id_list(&ids))?;
+
+            // Invalidate lookup cache for this key
+            let full_key = self.build_full_key(entity_type, key);
+            self.lookup_cache.remove(&full_key);
+        }
+
+        // Update has_index cache (we definitely have an index now)
+        self.has_index_cache
+            .insert((entity_type.to_string(), column_name.to_string()), true);
+
+        Ok(total_inserted)
     }
 
     /// Remove an entity ID from the index for a value.
@@ -162,8 +260,12 @@ impl HashIndex {
             if ids.is_empty() {
                 tree.remove(&key)?;
             } else {
-                tree.insert(key, Self::encode_id_list(&ids))?;
+                tree.insert(&key, Self::encode_id_list(&ids))?;
             }
+
+            // Invalidate lookup cache for this key
+            let full_key = self.build_full_key(entity_type, &key);
+            self.lookup_cache.remove(&full_key);
         }
 
         Ok(())
@@ -172,25 +274,68 @@ impl HashIndex {
     /// Lookup all entity IDs for a value. O(1) operation.
     ///
     /// Returns an empty vector if no entities have this value.
+    /// Uses an in-memory cache for hot values to avoid disk I/O.
     pub fn lookup(
         &self,
         entity_type: &str,
         column_name: &str,
         value: &Value,
     ) -> Result<Vec<[u8; 16]>, Error> {
-        let tree = self.tree_for_entity(entity_type)?;
         let key = Self::build_key(column_name, value);
+        let full_key = self.build_full_key(entity_type, &key);
 
-        match tree.get(&key)? {
-            Some(bytes) => Ok(Self::decode_id_list(&bytes)),
-            None => Ok(vec![]),
+        // Check cache first (O(1) in-memory lookup)
+        if let Some(cached) = self.lookup_cache.get(&full_key) {
+            return Ok(cached.clone());
+        }
+
+        // Cache miss - fetch from disk
+        let tree = self.tree_for_entity(entity_type)?;
+        let ids = match tree.get(&key)? {
+            Some(bytes) => Self::decode_id_list(&bytes),
+            None => vec![],
+        };
+
+        // Update cache (with simple eviction when too large)
+        self.maybe_evict_lookup_cache();
+        self.lookup_cache.insert(full_key, ids.clone());
+
+        Ok(ids)
+    }
+
+    /// Simple cache eviction: clear half the cache when it gets too large.
+    fn maybe_evict_lookup_cache(&self) {
+        let ops = self.lookup_cache_ops.fetch_add(1, Ordering::Relaxed);
+
+        // Check every 1000 operations
+        if ops % 1000 == 0 && self.lookup_cache.len() > LOOKUP_CACHE_MAX_ENTRIES {
+            // Simple eviction: remove ~half the entries
+            let to_remove: Vec<_> = self
+                .lookup_cache
+                .iter()
+                .take(self.lookup_cache.len() / 2)
+                .map(|r| r.key().clone())
+                .collect();
+
+            for key in to_remove {
+                self.lookup_cache.remove(&key);
+            }
         }
     }
 
     /// Check if a hash index exists for a column.
     ///
-    /// This scans the tree prefix to see if any entries exist for the column.
+    /// Uses an in-memory cache to avoid expensive prefix scans on every query.
+    /// The cache is populated on index creation and checked first.
     pub fn has_index(&self, entity_type: &str, column_name: &str) -> Result<bool, Error> {
+        let cache_key = (entity_type.to_string(), column_name.to_string());
+
+        // Check cache first (O(1) lookup)
+        if let Some(exists) = self.has_index_cache.get(&cache_key) {
+            return Ok(*exists);
+        }
+
+        // Cache miss - perform prefix scan
         let tree = self.tree_for_entity(entity_type)?;
 
         // Build prefix for this column
@@ -201,7 +346,12 @@ impl HashIndex {
         prefix.push(0x00);
 
         // Check if any entries exist with this prefix
-        Ok(tree.scan_prefix(&prefix).next().is_some())
+        let exists = tree.scan_prefix(&prefix).next().is_some();
+
+        // Cache the result
+        self.has_index_cache.insert(cache_key, exists);
+
+        Ok(exists)
     }
 
     /// Build index for a column from columnar data.
@@ -229,6 +379,13 @@ impl HashIndex {
     pub fn drop_index(&self, entity_type: &str) -> Result<(), Error> {
         let tree_name = format!("{}{}", HASH_INDEX_TREE_PREFIX, entity_type);
         self.db.drop_tree(tree_name)?;
+
+        // Clear caches for this entity type
+        self.has_index_cache
+            .retain(|k, _| k.0 != entity_type);
+        self.lookup_cache
+            .retain(|k, _| !k.starts_with(entity_type.as_bytes()));
+
         Ok(())
     }
 
@@ -252,6 +409,14 @@ impl HashIndex {
         for key in keys_to_remove {
             tree.remove(key)?;
         }
+
+        // Update caches
+        self.has_index_cache
+            .insert((entity_type.to_string(), column_name.to_string()), false);
+        // Clear lookup cache entries for this column (starts with entity_type + separator + column prefix)
+        let lookup_prefix = self.build_full_key(entity_type, &prefix[..prefix.len() - 1]); // exclude trailing 0x00
+        self.lookup_cache
+            .retain(|k, _| !k.starts_with(&lookup_prefix));
 
         Ok(())
     }
@@ -473,6 +638,75 @@ mod tests {
             .lookup("User", "status", &Value::String("active".to_string()))
             .unwrap();
         assert_eq!(active.len(), 2);
+
+        let inactive = index
+            .lookup("User", "status", &Value::String("inactive".to_string()))
+            .unwrap();
+        assert_eq!(inactive.len(), 1);
+    }
+
+    #[test]
+    fn test_insert_batch() {
+        let index = test_index();
+
+        // Batch insert 1000 entities with 4 status values
+        let entries: Vec<(Value, [u8; 16])> = (0..1000)
+            .map(|i| {
+                let status = match i % 4 {
+                    0 => "active",
+                    1 => "inactive",
+                    2 => "pending",
+                    _ => "admin",
+                };
+                let mut id = [0u8; 16];
+                id[0..8].copy_from_slice(&(i as u64).to_le_bytes());
+                (Value::String(status.to_string()), id)
+            })
+            .collect();
+
+        let count = index.insert_batch("User", "status", entries).unwrap();
+        assert_eq!(count, 1000);
+
+        // Verify distribution
+        let active = index
+            .lookup("User", "status", &Value::String("active".to_string()))
+            .unwrap();
+        assert_eq!(active.len(), 250);
+
+        let inactive = index
+            .lookup("User", "status", &Value::String("inactive".to_string()))
+            .unwrap();
+        assert_eq!(inactive.len(), 250);
+    }
+
+    #[test]
+    fn test_insert_batch_with_existing() {
+        let index = test_index();
+
+        // Insert some existing entries
+        let id1 = [1u8; 16];
+        let id2 = [2u8; 16];
+        index
+            .insert("User", "status", &Value::String("active".to_string()), id1)
+            .unwrap();
+        index
+            .insert("User", "status", &Value::String("active".to_string()), id2)
+            .unwrap();
+
+        // Batch insert including duplicates and new entries
+        let entries: Vec<(Value, [u8; 16])> = vec![
+            (Value::String("active".to_string()), id1), // duplicate
+            (Value::String("active".to_string()), [3u8; 16]), // new
+            (Value::String("inactive".to_string()), [4u8; 16]), // new value
+        ];
+
+        let count = index.insert_batch("User", "status", entries).unwrap();
+        assert_eq!(count, 2); // Only 2 new entries, not the duplicate
+
+        let active = index
+            .lookup("User", "status", &Value::String("active".to_string()))
+            .unwrap();
+        assert_eq!(active.len(), 3); // id1, id2, [3u8; 16]
 
         let inactive = index
             .lookup("User", "status", &Value::String("inactive".to_string()))

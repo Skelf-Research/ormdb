@@ -1,0 +1,140 @@
+site_name: ORMDB Documentation
+site_description: The ORM-first relational database - typed queries, graph fetches, and safe migrations
+site_url: https://docs.skelfresearch.com/ormdb
+repo_url: https://github.com/Skelf-Research/ormdb
+repo_name: Skelf-Research/ormdb
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.copy
+    - content.code.annotate
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+  - tags
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - getting-started/index.md
+    - Installation: getting-started/installation.md
+    - Quickstart: getting-started/quickstart.md
+    - Your First App: getting-started/first-app.md
+  - Core Concepts:
+    - concepts/index.md
+    - Graph Queries: concepts/graph-queries.md
+    - Typed Protocol: concepts/typed-protocol.md
+    - MVCC: concepts/mvcc.md
+    - Storage Architecture: concepts/storage-architecture.md
+    - Migration Safety: concepts/migration-safety.md
+  - Tutorials:
+    - tutorials/index.md
+    - Schema Design: tutorials/schema-design.md
+    - Querying Data: tutorials/querying-data.md
+    - Mutations: tutorials/mutations.md
+    - Relations: tutorials/relations.md
+    - Filtering: tutorials/filtering.md
+    - Transactions: tutorials/transactions.md
+  - Guides:
+    - guides/index.md
+    - Schema Migrations: guides/schema-migrations.md
+    - Security: guides/security.md
+    - Performance: guides/performance.md
+    - Pagination: guides/pagination.md
+    - Aggregations: guides/aggregations.md
+    - Change Data Capture: guides/cdc.md
+  - ORM Adapters:
+    - adapters/index.md
+    - Prisma: adapters/prisma.md
+    - Drizzle: adapters/drizzle.md
+    - TypeORM: adapters/typeorm.md
+    - Sequelize: adapters/sequelize.md
+    - Kysely: adapters/kysely.md
+    - SQLAlchemy: adapters/sqlalchemy.md
+    - Django: adapters/django.md
+  - Clients:
+    - clients/index.md
+    - Rust: clients/rust.md
+    - TypeScript: clients/typescript.md
+    - Python: clients/python.md
+  - Comparisons:
+    - comparisons/vs-sqlite.md
+    - comparisons/vs-traditional-orms.md
+    - comparisons/vs-postgres.md
+  - Architecture:
+    - architecture/index.md
+    - Query Engine: architecture/query-engine.md
+    - Storage Engine: architecture/storage-engine.md
+    - Index Internals: architecture/index-internals.md
+  - Examples:
+    - examples/index.md
+    - Todo App: examples/todo-app.md
+    - Blog Platform: examples/blog-platform.md
+    - Multi-Tenant SaaS: examples/multi-tenant-saas.md
+    - Real-time Dashboard: examples/realtime-dashboard.md
+  - Operations:
+    - operations/index.md
+    - Deployment: operations/deployment.md
+    - Monitoring: operations/monitoring.md
+    - Backup & Restore: operations/backup-restore.md
+    - Troubleshooting: operations/troubleshooting.md
+  - Reference:
+    - reference/index.md
+    - Query API: reference/query-api.md
+    - Mutation API: reference/mutation-api.md
+    - Value Types: reference/value-types.md
+    - Errors: reference/errors.md
+    - Configuration: reference/configuration.md
+    - CLI: reference/cli.md
+  - Changelog: changelog.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Skelf-Research/ormdb
+  generator: false

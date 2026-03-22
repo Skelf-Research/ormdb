@@ -6,6 +6,7 @@ use crate::error::Error;
 use crate::storage::{ColumnarStore, StorageEngine};
 use ormdb_proto::{AggregateFunction, AggregateQuery, AggregateResult, AggregateValue, Value};
 
+use super::join::EntityRow;
 use super::FilterEvaluator;
 
 /// Executor for aggregate queries.
@@ -95,23 +96,37 @@ impl<'a> AggregateExecutor<'a> {
     /// Execute an aggregate query with a filter.
     ///
     /// This requires scanning entities and applying the filter before aggregation.
+    /// Uses batch lookups for better performance (single batch read vs N individual reads).
     fn execute_with_filter(&self, query: &AggregateQuery) -> Result<AggregateResult, Error> {
         let filter = query.filter.as_ref().unwrap();
 
-        // Collect matching entity IDs
-        let matching_ids: Vec<[u8; 16]> = self
+        // First, collect all entity IDs
+        let all_ids: Vec<[u8; 16]> = self
             .storage
             .list_entity_ids(&query.root_entity)
-            .filter_map(|result| {
-                let id = result.ok()?;
-                // Get the latest entity record to evaluate filter
-                let (_, record) = self.storage.get_latest(&id).ok()??;
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if all_ids.is_empty() {
+            return self.compute_filtered_aggregates(query, &[]);
+        }
+
+        // Batch fetch all records (much faster than N individual get_latest calls)
+        let batch_results = self.storage.get_latest_batch(&all_ids)?;
+
+        // Filter the results in memory
+        let matching_ids: Vec<[u8; 16]> = all_ids
+            .into_iter()
+            .zip(batch_results.into_iter())
+            .filter_map(|(id, result)| {
+                let (_, record) = result?;
                 // Check if record is deleted (tombstone)
                 if record.deleted {
                     return None;
                 }
-                // Deserialize and check filter
-                let entity = super::decode_entity(&record.data).ok()?;
+                // Deserialize and check filter using EntityRow with O(1) field lookups
+                let fields = super::decode_entity(&record.data).ok()?;
+                let entity = EntityRow::with_index(id, fields);
                 if FilterEvaluator::evaluate(&filter.expression, &entity).ok()? {
                     Some(id)
                 } else {

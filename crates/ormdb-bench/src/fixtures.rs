@@ -28,7 +28,7 @@ impl Scale {
         match self {
             Scale::Tiny => 10,
             Scale::Small => 100,
-            Scale::Medium => 10_000,
+            Scale::Medium => 2_000,  // Reduced from 10,000 for faster tests
             Scale::Large => 100_000,
         }
     }
@@ -38,7 +38,7 @@ impl Scale {
         match self {
             Scale::Tiny => 2,
             Scale::Small => 5,
-            Scale::Medium => 10,
+            Scale::Medium => 5,  // Reduced from 10
             Scale::Large => 10,
         }
     }
@@ -48,7 +48,7 @@ impl Scale {
         match self {
             Scale::Tiny => 1,
             Scale::Small => 3,
-            Scale::Medium => 5,
+            Scale::Medium => 2,  // Reduced from 5
             Scale::Large => 5,
         }
     }
@@ -308,7 +308,7 @@ mod tests {
     fn test_scale_counts() {
         assert_eq!(Scale::Tiny.count(), 10);
         assert_eq!(Scale::Small.count(), 100);
-        assert_eq!(Scale::Medium.count(), 10_000);
+        assert_eq!(Scale::Medium.count(), 2_000);
         assert_eq!(Scale::Large.count(), 100_000);
     }
 }

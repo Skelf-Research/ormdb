@@ -92,7 +92,8 @@ pub fn insert_entity(
 }
 
 /// Batch size for grouped inserts during population.
-const POPULATION_BATCH_SIZE: usize = 1000;
+/// Larger batches reduce transaction commit overhead.
+const POPULATION_BATCH_SIZE: usize = 10_000;
 
 /// Populate storage with benchmark data at the specified scale.
 ///
@@ -105,7 +106,7 @@ pub fn populate_storage(ctx: &TestContext, scale: Scale) {
     let users = generate_users(user_count);
     let user_ids: Vec<_> = users.iter().map(|u| u.id).collect();
 
-    // Insert users in batches and build indexes
+    // Insert users in batches
     for chunk in users.chunks(POPULATION_BATCH_SIZE) {
         let mut txn = ctx.storage.transaction();
         for user in chunk {
@@ -113,23 +114,27 @@ pub fn populate_storage(ctx: &TestContext, scale: Scale) {
             let data = encode_entity(&fields).unwrap();
             let key = VersionedKey::now(user.id);
             txn.put_typed("User", key, Record::new(data));
-
-            // Build hash index for "status" field (for filter_eq benchmark)
-            if let Some((_, status_value)) = fields.iter().find(|(k, _)| k == "status") {
-                ctx.storage
-                    .hash_index()
-                    .insert("User", "status", status_value, user.id)
-                    .unwrap();
-            }
-
-            // Build B-tree index for "age" field (for filter_range benchmark)
-            if let Some(btree) = ctx.storage.btree_index() {
-                if let Some((_, age_value)) = fields.iter().find(|(k, _)| k == "age") {
-                    btree.insert("User", "age", age_value, user.id).unwrap();
-                }
-            }
         }
         txn.commit().unwrap();
+    }
+
+    // Build hash index for "status" field using batch API (O(n) instead of O(n^2))
+    let status_entries: Vec<(Value, [u8; 16])> = users
+        .iter()
+        .map(|u| (Value::String(u.status.clone()), u.id))
+        .collect();
+    ctx.storage
+        .hash_index()
+        .insert_batch("User", "status", status_entries)
+        .unwrap();
+
+    // Build B-tree index for "age" field
+    if let Some(btree) = ctx.storage.btree_index() {
+        for user in &users {
+            btree
+                .insert("User", "age", &Value::Int32(user.age), user.id)
+                .unwrap();
+        }
     }
 
     let post_count = user_count * posts_per_user;
@@ -353,7 +358,7 @@ mod tests {
         let start = Instant::now();
         for _ in 0..iterations {
             let result = ctx.executor().execute(&query).unwrap();
-            assert_eq!(result.entities[0].len(), 2500); // 10,000 / 4 statuses
+            assert_eq!(result.entities[0].len(), 500); // 2,000 / 4 statuses
         }
         let total_time = start.elapsed();
         let avg_time = total_time / iterations;

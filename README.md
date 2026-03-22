@@ -54,6 +54,16 @@ Design phase. This repo captures the requirements, tradeoffs, and proposed archi
 - Cache invalidation is correct by construction via identity versioning.
 - Observability makes plans, costs, and shape decisions explainable.
 
+## Links
+
+- **Documentation:** https://docs.skelfresearch.com/ormdb
+- **Repository:** https://github.com/Skelf-Research/ormdb
+- **Issues:** https://github.com/Skelf-Research/ormdb/issues
+
+## Author
+
+Created by [Dipankar Sarkar](mailto:me@dipankar.name) at [Skelf Research](mailto:support@skelfresearch.com).
+
 ## License
 
-TBD.
+MIT OR Apache-2.0

@@ -84,6 +84,48 @@ impl OrmdbBackend {
     }
 
     // -------------------------------------------------------------------------
+    // Row-Oriented Query Operations (faster path, skips column transposition)
+    // -------------------------------------------------------------------------
+
+    /// Scan all users using the row-oriented path (faster, no transposition).
+    pub fn scan_users_rows(&self) -> Vec<UserRow> {
+        let query = GraphQuery::new("User");
+        let (rows, _has_more) = self.ctx.executor().execute_rows(&query).unwrap();
+        entity_rows_to_user_rows(&rows)
+    }
+
+    /// Scan users with a limit using the row-oriented path.
+    pub fn scan_users_limit_rows(&self, limit: usize) -> Vec<UserRow> {
+        let query = GraphQuery::new("User").with_pagination(Pagination::limit(limit as u32));
+        let (rows, _has_more) = self.ctx.executor().execute_rows(&query).unwrap();
+        entity_rows_to_user_rows(&rows)
+    }
+
+    /// Filter users by status using the row-oriented path.
+    pub fn filter_users_by_status_rows(&self, status: &str) -> Vec<UserRow> {
+        let query = GraphQuery::new("User")
+            .with_filter(FilterExpr::eq("status", Value::String(status.to_string())).into());
+        let (rows, _has_more) = self.ctx.executor().execute_rows(&query).unwrap();
+        entity_rows_to_user_rows(&rows)
+    }
+
+    /// Filter users by age (greater than) using the row-oriented path.
+    pub fn filter_users_by_age_gt_rows(&self, age: i32) -> Vec<UserRow> {
+        let query =
+            GraphQuery::new("User").with_filter(FilterExpr::gt("age", Value::Int32(age)).into());
+        let (rows, _has_more) = self.ctx.executor().execute_rows(&query).unwrap();
+        entity_rows_to_user_rows(&rows)
+    }
+
+    /// Filter users by name pattern (LIKE) using the row-oriented path.
+    pub fn filter_users_by_name_like_rows(&self, pattern: &str) -> Vec<UserRow> {
+        let query =
+            GraphQuery::new("User").with_filter(FilterExpr::like("name", pattern).into());
+        let (rows, _has_more) = self.ctx.executor().execute_rows(&query).unwrap();
+        entity_rows_to_user_rows(&rows)
+    }
+
+    // -------------------------------------------------------------------------
     // Graph Query Operations (ORMDB's N+1 elimination)
     // -------------------------------------------------------------------------
 
@@ -258,6 +300,46 @@ fn group_posts_by_author(block: &EntityBlock) -> std::collections::HashMap<Strin
         map.entry(post.author_id.clone()).or_default().push(post);
     }
     map
+}
+
+// =============================================================================
+// Row-oriented conversion (faster path, skips column transposition)
+// =============================================================================
+
+use ormdb_core::query::EntityRow;
+
+/// Convert EntityRow (row-oriented) to UserRow.
+/// This is faster than going through EntityBlock as it skips transposition.
+fn entity_row_to_user_row(row: &EntityRow) -> UserRow {
+    let get_str = |name: &str| -> String {
+        row.get_field(name)
+            .and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    let get_i32 = |name: &str| -> i32 {
+        row.get_field(name)
+            .and_then(|v| match v {
+                Value::Int32(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(0)
+    };
+
+    UserRow {
+        id: hex::encode(row.id),
+        name: get_str("name"),
+        email: get_str("email"),
+        age: get_i32("age"),
+        status: get_str("status"),
+    }
+}
+
+/// Convert a Vec<EntityRow> to Vec<UserRow> using the row-oriented path.
+fn entity_rows_to_user_rows(rows: &[EntityRow]) -> Vec<UserRow> {
+    rows.iter().map(entity_row_to_user_row).collect()
 }
 
 #[cfg(test)]

@@ -1,0 +1,17 @@
+[package]
+name = "ormdb-ergonomics-demo"
+version = "0.1.0"
+edition = "2021"
+description = "Interactive TUI demo comparing ORMDB vs SQLite developer ergonomics"
+license = "MIT"
+
+# Standalone crate, not part of main workspace
+[workspace]
+
+[[bin]]
+name = "ergonomics-demo"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"

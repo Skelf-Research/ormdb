@@ -16,9 +16,10 @@ fn bench_scan(c: &mut Criterion) {
         let ormdb = OrmdbBackend::new(scale);
         let sqlite = SqliteBackend::with_scale(scale);
 
+        // Use row-oriented path (skips EntityBlock transposition)
         group.bench_with_input(BenchmarkId::new("ormdb", &name), &(), |b, _| {
             b.iter(|| {
-                let users = ormdb.scan_users();
+                let users = ormdb.scan_users_rows();
                 black_box(users.len());
             });
         });
@@ -40,10 +41,11 @@ fn bench_scan_limit(c: &mut Criterion) {
     let ormdb = OrmdbBackend::new(Scale::Medium);
     let sqlite = SqliteBackend::with_scale(Scale::Medium);
 
+    // Use row-oriented path (skips EntityBlock transposition)
     for limit in [10, 100, 1000] {
         group.bench_with_input(BenchmarkId::new("ormdb", limit), &limit, |b, &limit| {
             b.iter(|| {
-                let users = ormdb.scan_users_limit(limit);
+                let users = ormdb.scan_users_limit_rows(limit);
                 black_box(users.len());
             });
         });
@@ -65,9 +67,10 @@ fn bench_filter_eq(c: &mut Criterion) {
     let ormdb = OrmdbBackend::new(Scale::Medium);
     let sqlite = SqliteBackend::with_scale(Scale::Medium);
 
+    // Use row-oriented path (skips EntityBlock transposition)
     group.bench_function("ormdb", |b| {
         b.iter(|| {
-            let users = ormdb.filter_users_by_status("active");
+            let users = ormdb.filter_users_by_status_rows("active");
             black_box(users.len());
         });
     });
@@ -88,9 +91,10 @@ fn bench_filter_range(c: &mut Criterion) {
     let ormdb = OrmdbBackend::new(Scale::Medium);
     let sqlite = SqliteBackend::with_scale(Scale::Medium);
 
+    // Use row-oriented path (skips EntityBlock transposition)
     group.bench_function("ormdb", |b| {
         b.iter(|| {
-            let users = ormdb.filter_users_by_age_gt(50);
+            let users = ormdb.filter_users_by_age_gt_rows(50);
             black_box(users.len());
         });
     });
@@ -111,9 +115,10 @@ fn bench_filter_like(c: &mut Criterion) {
     let ormdb = OrmdbBackend::new(Scale::Medium);
     let sqlite = SqliteBackend::with_scale(Scale::Medium);
 
+    // Use row-oriented path (skips EntityBlock transposition)
     group.bench_function("ormdb_prefix", |b| {
         b.iter(|| {
-            let users = ormdb.filter_users_by_name_like("Alice%");
+            let users = ormdb.filter_users_by_name_like_rows("Alice%");
             black_box(users.len());
         });
     });
@@ -127,7 +132,7 @@ fn bench_filter_like(c: &mut Criterion) {
 
     group.bench_function("ormdb_contains", |b| {
         b.iter(|| {
-            let users = ormdb.filter_users_by_name_like("%_1%");
+            let users = ormdb.filter_users_by_name_like_rows("%_1%");
             black_box(users.len());
         });
     });

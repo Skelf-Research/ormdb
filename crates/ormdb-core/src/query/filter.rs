@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 
 use crate::error::Error;
+use crate::query::join::EntityRow;
 use ormdb_proto::{FilterExpr, SimpleFilter, Value};
 
 /// Extract all field names referenced in a filter expression.
@@ -58,14 +59,45 @@ fn extract_simple_filter_fields(filter: &SimpleFilter, fields: &mut HashSet<Stri
     }
 }
 
+/// Check if a LIKE pattern is prefix-only (can use B-tree index).
+///
+/// Returns `Some(prefix)` if pattern is `"prefix%"` with no wildcards in prefix.
+/// Returns `None` for patterns that cannot use index (suffix, contains, etc).
+///
+/// # Examples
+/// ```ignore
+/// extract_like_prefix("Alice%")  // Some("Alice")
+/// extract_like_prefix("%Alice")  // None (suffix pattern)
+/// extract_like_prefix("%Alice%") // None (contains pattern)
+/// extract_like_prefix("Al_ce%")  // None (has underscore)
+/// ```
+pub fn extract_like_prefix(pattern: &str) -> Option<&str> {
+    // Must end with % and have no other wildcards
+    if !pattern.ends_with('%') {
+        return None;
+    }
+    let prefix = &pattern[..pattern.len() - 1];
+    // No wildcards allowed in prefix
+    if prefix.contains('%') || prefix.contains('_') || prefix.contains('\\') {
+        return None;
+    }
+    if prefix.is_empty() {
+        return None; // Just "%" matches everything, not useful for index
+    }
+    Some(prefix)
+}
+
 /// Evaluates filter expressions against entity data.
 pub struct FilterEvaluator;
 
 impl FilterEvaluator {
-    /// Evaluate a filter expression against a row of field values.
+    /// Evaluate a filter expression against an entity row.
+    ///
+    /// For best performance, use `EntityRow::with_index()` to create rows with
+    /// pre-built field indexes, enabling O(1) field lookups instead of O(M).
     ///
     /// Returns `true` if the row matches the filter, `false` otherwise.
-    pub fn evaluate(filter: &FilterExpr, row: &[(String, Value)]) -> Result<bool, Error> {
+    pub fn evaluate(filter: &FilterExpr, row: &EntityRow) -> Result<bool, Error> {
         match filter {
             FilterExpr::Eq { field, value } => {
                 Self::compare_field(row, field, value, Self::values_equal)
@@ -149,7 +181,7 @@ impl FilterEvaluator {
     }
 
     /// Evaluate a simple (non-compound) filter.
-    fn evaluate_simple(filter: &SimpleFilter, row: &[(String, Value)]) -> Result<bool, Error> {
+    fn evaluate_simple(filter: &SimpleFilter, row: &EntityRow) -> Result<bool, Error> {
         match filter {
             SimpleFilter::Eq { field, value } => {
                 Self::compare_field(row, field, value, Self::values_equal)
@@ -217,13 +249,16 @@ impl FilterEvaluator {
     }
 
     /// Get a field value from a row by name.
-    fn get_field_value<'a>(row: &'a [(String, Value)], field: &str) -> Option<&'a Value> {
-        row.iter().find(|(name, _)| name == field).map(|(_, v)| v)
+    /// Uses O(1) hash lookup if the row has a pre-built field index.
+    #[inline]
+    fn get_field_value<'a>(row: &'a EntityRow, field: &str) -> Option<&'a Value> {
+        row.get_field(field)
     }
 
     /// Compare a field value with a comparator function.
+    #[inline]
     fn compare_field<F>(
-        row: &[(String, Value)],
+        row: &EntityRow,
         field: &str,
         value: &Value,
         comparator: F,
@@ -285,7 +320,111 @@ impl FilterEvaluator {
     /// - `_` matches exactly one character
     /// - `\\%` matches literal `%`
     /// - `\\_` matches literal `_`
+    ///
+    /// Uses fast paths for common patterns and iterative matching for complex ones.
     pub fn like_match(value: &str, pattern: &str) -> bool {
+        // Check if pattern contains escape sequences (need special handling)
+        let has_escapes = pattern.contains('\\');
+
+        // Fast path 1: No wildcards - exact match
+        if !pattern.contains('%') && !pattern.contains('_') && !has_escapes {
+            return value == pattern;
+        }
+
+        // Fast path 2: Single % at end (prefix match) - e.g., "Alice%"
+        if pattern.ends_with('%')
+            && !pattern[..pattern.len() - 1].contains('%')
+            && !pattern.contains('_')
+            && !has_escapes
+        {
+            return value.starts_with(&pattern[..pattern.len() - 1]);
+        }
+
+        // Fast path 3: Single % at start (suffix match) - e.g., "%example.com"
+        if pattern.starts_with('%')
+            && !pattern[1..].contains('%')
+            && !pattern.contains('_')
+            && !has_escapes
+        {
+            return value.ends_with(&pattern[1..]);
+        }
+
+        // Fast path 4: %substring% (contains) - e.g., "%@%"
+        if pattern.starts_with('%') && pattern.ends_with('%') && pattern.len() >= 2 {
+            let inner = &pattern[1..pattern.len() - 1];
+            if !inner.contains('%') && !inner.contains('_') && !has_escapes {
+                return value.contains(inner);
+            }
+        }
+
+        // Fast path 5: prefix%suffix (single % in middle) - e.g., "user%@example.com"
+        if !has_escapes && !pattern.contains('_') {
+            let percent_count = pattern.chars().filter(|&c| c == '%').count();
+            if percent_count == 1 {
+                if let Some(idx) = pattern.find('%') {
+                    let prefix = &pattern[..idx];
+                    let suffix = &pattern[idx + 1..];
+                    return value.starts_with(prefix)
+                        && value.ends_with(suffix)
+                        && value.len() >= prefix.len() + suffix.len();
+                }
+            }
+        }
+
+        // Complex pattern: use iterative matching
+        if has_escapes {
+            Self::like_match_with_escapes(value, pattern)
+        } else {
+            Self::like_match_iterative(value, pattern)
+        }
+    }
+
+    /// Iterative LIKE matching for patterns without escape sequences.
+    /// Uses a two-pointer algorithm with backtracking markers (O(n) amortized).
+    fn like_match_iterative(value: &str, pattern: &str) -> bool {
+        let value_bytes = value.as_bytes();
+        let pattern_bytes = pattern.as_bytes();
+
+        let mut vi = 0; // value index
+        let mut pi = 0; // pattern index
+        let mut star_pi = usize::MAX; // pattern position after last %
+        let mut star_vi = usize::MAX; // value position when % was seen
+
+        while vi < value_bytes.len() {
+            if pi < pattern_bytes.len() && pattern_bytes[pi] == b'_' {
+                // Underscore matches exactly one character
+                vi += 1;
+                pi += 1;
+            } else if pi < pattern_bytes.len() && pattern_bytes[pi] == value_bytes[vi] {
+                // Exact character match
+                vi += 1;
+                pi += 1;
+            } else if pi < pattern_bytes.len() && pattern_bytes[pi] == b'%' {
+                // Record position for potential backtrack
+                star_pi = pi + 1;
+                star_vi = vi;
+                pi += 1;
+            } else if star_pi != usize::MAX {
+                // Backtrack: % matches one more character
+                pi = star_pi;
+                star_vi += 1;
+                vi = star_vi;
+            } else {
+                return false;
+            }
+        }
+
+        // Consume trailing % in pattern
+        while pi < pattern_bytes.len() && pattern_bytes[pi] == b'%' {
+            pi += 1;
+        }
+
+        pi == pattern_bytes.len()
+    }
+
+    /// LIKE matching for patterns with escape sequences.
+    /// Falls back to character-by-character matching with escape handling.
+    fn like_match_with_escapes(value: &str, pattern: &str) -> bool {
         let mut chars = value.chars().peekable();
         let mut pattern_chars = pattern.chars().peekable();
 
@@ -365,8 +504,41 @@ impl FilterEvaluator {
 mod tests {
     use super::*;
 
-    fn make_row(fields: Vec<(&str, Value)>) -> Vec<(String, Value)> {
-        fields.into_iter().map(|(n, v)| (n.to_string(), v)).collect()
+    fn make_row(fields: Vec<(&str, Value)>) -> EntityRow {
+        let fields: Vec<(String, Value)> = fields
+            .into_iter()
+            .map(|(n, v)| (n.to_string(), v))
+            .collect();
+        EntityRow::with_index([0u8; 16], fields)
+    }
+
+    #[test]
+    fn test_extract_like_prefix() {
+        // Valid prefix patterns
+        assert_eq!(extract_like_prefix("Alice%"), Some("Alice"));
+        assert_eq!(extract_like_prefix("A%"), Some("A"));
+        assert_eq!(extract_like_prefix("Hello World%"), Some("Hello World"));
+
+        // Invalid patterns - suffix
+        assert_eq!(extract_like_prefix("%Alice"), None);
+
+        // Invalid patterns - contains
+        assert_eq!(extract_like_prefix("%Alice%"), None);
+
+        // Invalid patterns - has underscore
+        assert_eq!(extract_like_prefix("Al_ce%"), None);
+
+        // Invalid patterns - multiple %
+        assert_eq!(extract_like_prefix("Al%ce%"), None);
+
+        // Invalid patterns - just %
+        assert_eq!(extract_like_prefix("%"), None);
+
+        // Invalid patterns - no wildcard
+        assert_eq!(extract_like_prefix("Alice"), None);
+
+        // Invalid patterns - has escape
+        assert_eq!(extract_like_prefix("Al\\%ce%"), None);
     }
 
     #[test]
