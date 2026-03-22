@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  ormdb-studio:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      - ormdb-data:/app/data
+    environment:
+      - ORMDB_STUDIO_HOST=0.0.0.0
+      - ORMDB_STUDIO_PORT=3000
+      - ORMDB_STUDIO_SESSION_TIMEOUT=120
+      - ORMDB_STUDIO_MAX_SESSIONS=20
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  ormdb-data:

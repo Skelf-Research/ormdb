@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# Build artifacts
+target/
+**/node_modules/
+**/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test files
+**/*.test.*
+**/*_test.*
+
+# Documentation
+*.md
+!README.md
+
+# Demo directory itself (avoid recursion)
+demo/
