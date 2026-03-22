@@ -2,6 +2,19 @@
 name = "ormdb-server"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Standalone ORMDB database server"
+readme = "README.md"
+keywords = ["database", "orm", "server"]
+categories = ["database"]
+
+[[bin]]
+name = "ormdb-server"
+path = "src/main.rs"
 
 [dependencies]
 ormdb-core.workspace = true

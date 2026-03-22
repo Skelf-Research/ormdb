@@ -3,7 +3,14 @@ name = "ormdb-lang"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 description = "ORM-style query language parser and compiler for ORMDB"
+readme = "README.md"
+keywords = ["database", "parser", "query-language", "compiler"]
+categories = ["database", "parsing"]
 
 [dependencies]
 logos = "0.14"

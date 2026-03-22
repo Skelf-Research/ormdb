@@ -2,6 +2,15 @@
 name = "ormdb-proto"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Wire protocol definitions for ORMDB with zero-copy serialization"
+readme = "README.md"
+keywords = ["database", "protocol", "serialization", "rkyv"]
+categories = ["database", "encoding"]
 
 [dependencies]
 rkyv.workspace = true

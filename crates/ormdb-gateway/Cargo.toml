@@ -2,6 +2,15 @@
 name = "ormdb-gateway"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "HTTP/REST gateway for ORMDB"
+readme = "README.md"
+keywords = ["database", "orm", "http", "rest", "gateway"]
+categories = ["web-programming::http-server", "database"]
 
 [[bin]]
 name = "ormdb-gateway"

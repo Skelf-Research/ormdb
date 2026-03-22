@@ -2,6 +2,15 @@
 name = "ormdb-client"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Async Rust client library for ORMDB"
+readme = "README.md"
+keywords = ["database", "orm", "client", "async"]
+categories = ["database", "asynchronous"]
 
 [dependencies]
 ormdb-proto.workspace = true

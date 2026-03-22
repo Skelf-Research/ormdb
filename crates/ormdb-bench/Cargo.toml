@@ -2,6 +2,11 @@
 name = "ormdb-bench"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Benchmarking suite for ORMDB"
+readme = "README.md"
 publish = false
 
 [dependencies]
