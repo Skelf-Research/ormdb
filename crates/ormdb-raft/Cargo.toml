@@ -1,0 +1,46 @@
+[package]
+name = "ormdb-raft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "Raft consensus implementation for ORMDB using openraft"
+readme = "README.md"
+keywords = ["database", "raft", "consensus", "distributed"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+# Internal crates
+ormdb-core.workspace = true
+ormdb-proto.workspace = true
+
+# Raft consensus
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
+
+# Runtime and async
+tokio.workspace = true
+async-trait = "0.1"
+
+# Networking
+async-nng.workspace = true
+nng.workspace = true
+
+# Serialization
+rkyv.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Storage
+sled.workspace = true
+
+# Utilities
+tracing.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+anyerror = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

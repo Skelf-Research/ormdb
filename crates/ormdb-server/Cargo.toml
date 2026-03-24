@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 ormdb-core.workspace = true
 ormdb-proto.workspace = true
+ormdb-raft = { path = "../ormdb-raft", optional = true }
 async-nng.workspace = true
 nng.workspace = true
 rkyv.workspace = true
@@ -28,6 +29,10 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 thiserror.workspace = true
 sled.workspace = true
+
+[features]
+default = []
+raft = ["ormdb-raft"]
 
 [dev-dependencies]
 tempfile = "3"

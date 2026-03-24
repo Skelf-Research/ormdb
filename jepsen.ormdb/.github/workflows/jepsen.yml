@@ -1,0 +1,202 @@
+name: Jepsen Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      workload:
+        description: 'Workload to test'
+        required: false
+        default: 'register'
+        type: choice
+        options:
+          - register
+          - bank
+          - set
+          - list-append
+          - all
+      nemesis:
+        description: 'Nemesis type'
+        required: false
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - kill
+          - partition
+          - clock
+          - combined
+      time_limit:
+        description: 'Test duration in seconds'
+        required: false
+        default: '180'
+
+jobs:
+  build-ormdb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build ormdb binaries
+        run: |
+          cargo build --release -p ormdb-server -p ormdb-gateway
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ormdb-binaries
+          path: |
+            target/release/ormdb-server
+            target/release/ormdb-gateway
+
+  jepsen-tests:
+    needs: build-ormdb
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        workload: [register, bank, set, list-append]
+        nemesis: [none, kill, partition]
+        exclude:
+          # Skip some combinations to reduce CI time
+          - workload: list-append
+            nemesis: kill
+          - workload: list-append
+            nemesis: partition
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ormdb binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ormdb-binaries
+          path: ./binaries
+
+      - name: Make binaries executable
+        run: chmod +x ./binaries/*
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker images
+        working-directory: ./jepsen.ormdb
+        run: |
+          docker-compose build
+
+      - name: Copy binaries to shared volume
+        working-directory: ./jepsen.ormdb
+        run: |
+          docker-compose up -d n1
+          docker cp ../binaries/ormdb-server jepsen-n1:/ormdb-binaries/
+          docker cp ../binaries/ormdb-gateway jepsen-n1:/ormdb-binaries/
+          docker-compose down
+
+      - name: Start Jepsen cluster
+        working-directory: ./jepsen.ormdb
+        run: |
+          docker-compose up -d
+
+      - name: Wait for cluster to be ready
+        run: sleep 30
+
+      - name: Run Jepsen test
+        working-directory: ./jepsen.ormdb
+        run: |
+          docker-compose exec -T control lein run test \
+            --workload ${{ matrix.workload }} \
+            --nemesis ${{ matrix.nemesis }} \
+            --time-limit 180 \
+            --rate 10 \
+            --nodes n1,n2,n3,n4,n5 \
+            --ormdb-server-binary /ormdb-binaries/ormdb-server \
+            --ormdb-gateway-binary /ormdb-binaries/ormdb-gateway
+
+      - name: Check for failures
+        working-directory: ./jepsen.ormdb
+        run: |
+          if grep -q ":valid? false" store/latest/results.edn 2>/dev/null; then
+            echo "Jepsen test found consistency violations!"
+            cat store/latest/results.edn
+            exit 1
+          fi
+          echo "Test passed!"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jepsen-${{ matrix.workload }}-${{ matrix.nemesis }}
+          path: jepsen.ormdb/store/latest/
+
+      - name: Stop cluster
+        if: always()
+        working-directory: ./jepsen.ormdb
+        run: docker-compose down -v
+
+  # Nightly comprehensive tests
+  jepsen-comprehensive:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: build-ormdb
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    strategy:
+      fail-fast: false
+      matrix:
+        workload: [register, bank, set, list-append]
+        nemesis: [none, kill, pause, partition, clock, combined]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ormdb binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ormdb-binaries
+          path: ./binaries
+
+      - name: Make binaries executable
+        run: chmod +x ./binaries/*
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and run test
+        working-directory: ./jepsen.ormdb
+        run: |
+          docker-compose build
+          docker-compose up -d
+          sleep 30
+
+          docker-compose exec -T control lein run test \
+            --workload ${{ matrix.workload }} \
+            --nemesis ${{ matrix.nemesis }} \
+            --time-limit ${{ github.event.inputs.time_limit || '300' }} \
+            --rate 20 \
+            --nodes n1,n2,n3,n4,n5 \
+            --ormdb-server-binary /ormdb-binaries/ormdb-server \
+            --ormdb-gateway-binary /ormdb-binaries/ormdb-gateway
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jepsen-comprehensive-${{ matrix.workload }}-${{ matrix.nemesis }}
+          path: jepsen.ormdb/store/latest/
+
+      - name: Cleanup
+        if: always()
+        working-directory: ./jepsen.ormdb
+        run: docker-compose down -v

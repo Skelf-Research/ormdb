@@ -5,6 +5,9 @@ use ormdb_core::storage::RetentionPolicy;
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[cfg(feature = "raft")]
+use ormdb_raft::RaftConfig;
+
 /// Default TCP address for the server.
 pub const DEFAULT_TCP_ADDRESS: &str = "tcp://0.0.0.0:9000";
 
@@ -50,6 +53,18 @@ pub struct ServerConfig {
 
     /// Number of transport worker loops (AsyncContext instances).
     pub transport_workers: usize,
+
+    /// Raft configuration for cluster mode. None for standalone mode.
+    #[cfg(feature = "raft")]
+    pub raft_config: Option<RaftConfig>,
+
+    /// Whether to initialize the cluster on startup.
+    #[cfg(feature = "raft")]
+    pub cluster_init: bool,
+
+    /// Cluster members for initialization (node_id, address).
+    #[cfg(feature = "raft")]
+    pub cluster_members: Vec<(u64, String)>,
 }
 
 impl ServerConfig {
@@ -64,6 +79,12 @@ impl ServerConfig {
             retention_policy: RetentionPolicy::default(),
             compaction_interval: Some(Duration::from_secs(DEFAULT_COMPACTION_INTERVAL_SECS)),
             transport_workers: default_transport_workers(),
+            #[cfg(feature = "raft")]
+            raft_config: None,
+            #[cfg(feature = "raft")]
+            cluster_init: false,
+            #[cfg(feature = "raft")]
+            cluster_members: Vec::new(),
         }
     }
 
@@ -130,6 +151,19 @@ impl ServerConfig {
     pub fn has_compaction(&self) -> bool {
         self.compaction_interval.is_some()
     }
+
+    /// Set the Raft configuration for cluster mode.
+    #[cfg(feature = "raft")]
+    pub fn with_raft_config(mut self, config: RaftConfig) -> Self {
+        self.raft_config = Some(config);
+        self
+    }
+
+    /// Check if Raft clustering is enabled.
+    #[cfg(feature = "raft")]
+    pub fn has_raft(&self) -> bool {
+        self.raft_config.is_some()
+    }
 }
 
 impl Default for ServerConfig {
@@ -178,6 +212,32 @@ pub struct Args {
     /// Transport worker loops (0 = auto).
     #[arg(long, default_value_t = 0)]
     pub workers: usize,
+
+    /// Enable Raft cluster mode with the given node ID.
+    #[cfg(feature = "raft")]
+    #[arg(long)]
+    pub raft_node_id: Option<u64>,
+
+    /// Raft listen address (e.g., "0.0.0.0:9001").
+    #[cfg(feature = "raft")]
+    #[arg(long, default_value = "0.0.0.0:9001")]
+    pub raft_listen: String,
+
+    /// Raft advertise address (e.g., "192.168.1.10:9001").
+    #[cfg(feature = "raft")]
+    #[arg(long)]
+    pub raft_advertise: Option<String>,
+
+    /// Initialize Raft cluster with this node as the bootstrap node.
+    #[cfg(feature = "raft")]
+    #[arg(long)]
+    pub cluster_init: bool,
+
+    /// Comma-separated list of cluster members for initialization (id:addr format).
+    /// Example: "0:node1:9001,1:node2:9001,2:node3:9001"
+    #[cfg(feature = "raft")]
+    #[arg(long)]
+    pub cluster_members: Option<String>,
 }
 
 impl Args {
@@ -198,6 +258,21 @@ impl Args {
             self.workers.max(1)
         };
 
+        #[cfg(feature = "raft")]
+        let raft_config = self.raft_node_id.map(|node_id| {
+            let advertise_addr = self.raft_advertise.unwrap_or_else(|| self.raft_listen.clone());
+            RaftConfig::new(node_id)
+                .with_data_dir(&self.data_path)
+                .with_raft_listen_addr(&self.raft_listen)
+                .with_raft_advertise_addr(&advertise_addr)
+        });
+
+        #[cfg(feature = "raft")]
+        let cluster_members = self
+            .cluster_members
+            .map(|s| parse_cluster_members(&s))
+            .unwrap_or_default();
+
         ServerConfig {
             tcp_address,
             ipc_address: self.ipc,
@@ -207,8 +282,33 @@ impl Args {
             retention_policy,
             compaction_interval,
             transport_workers,
+            #[cfg(feature = "raft")]
+            raft_config,
+            #[cfg(feature = "raft")]
+            cluster_init: self.cluster_init,
+            #[cfg(feature = "raft")]
+            cluster_members,
         }
     }
+}
+
+/// Parse cluster members from string format "id:addr,id:addr,..."
+#[cfg(feature = "raft")]
+fn parse_cluster_members(s: &str) -> Vec<(u64, String)> {
+    s.split(',')
+        .filter_map(|member| {
+            let parts: Vec<&str> = member.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                if let Ok(id) = parts[0].parse::<u64>() {
+                    Some((id, parts[1].to_string()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

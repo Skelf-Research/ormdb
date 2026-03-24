@@ -13,6 +13,9 @@ use ormdb_proto::{
     Response, StorageMetrics, StreamChangesRequest, StreamChangesResponse, TransportMetrics,
 };
 
+#[cfg(feature = "raft")]
+use ormdb_raft::RaftClusterManager;
+
 use crate::database::Database;
 use crate::error::Error;
 use crate::mutation::MutationExecutor;
@@ -23,6 +26,8 @@ const STATS_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 pub struct RequestHandler {
     database: Arc<Database>,
     metrics: Option<SharedMetricsRegistry>,
+    #[cfg(feature = "raft")]
+    raft_manager: Option<Arc<RaftClusterManager>>,
 }
 
 impl RequestHandler {
@@ -31,6 +36,8 @@ impl RequestHandler {
         Self {
             database,
             metrics: None,
+            #[cfg(feature = "raft")]
+            raft_manager: None,
         }
     }
 
@@ -39,6 +46,22 @@ impl RequestHandler {
         Self {
             database,
             metrics: Some(metrics),
+            #[cfg(feature = "raft")]
+            raft_manager: None,
+        }
+    }
+
+    /// Create a new request handler with metrics and Raft support.
+    #[cfg(feature = "raft")]
+    pub fn with_metrics_and_raft(
+        database: Arc<Database>,
+        metrics: SharedMetricsRegistry,
+        raft_manager: Option<Arc<RaftClusterManager>>,
+    ) -> Self {
+        Self {
+            database,
+            metrics: Some(metrics),
+            raft_manager,
         }
     }
 
@@ -96,6 +119,7 @@ impl RequestHandler {
             }
             Operation::StreamChanges(req) => self.handle_stream_changes(request.id, req),
             Operation::GetReplicationStatus => self.handle_replication_status(request.id),
+            Operation::ApplySchema(bytes) => self.handle_apply_schema(request.id, bytes),
         }
     }
 
@@ -197,6 +221,25 @@ impl RequestHandler {
         };
 
         Ok(Response::schema_ok(request_id, version, data))
+    }
+
+    /// Handle an apply schema request.
+    fn handle_apply_schema(&self, request_id: u64, bytes: &[u8]) -> Result<Response, Error> {
+        use ormdb_core::catalog::SchemaBundle;
+
+        // Deserialize the schema from bytes
+        let schema = SchemaBundle::from_bytes(bytes)
+            .map_err(|e| Error::Database(format!("failed to deserialize schema: {}", e)))?;
+
+        // Apply the schema
+        self.database
+            .catalog()
+            .apply_schema(schema)
+            .map_err(|e| Error::Database(format!("failed to apply schema: {}", e)))?;
+
+        // Return the new version
+        let version = self.database.schema_version();
+        Ok(Response::schema_applied_ok(request_id, version))
     }
 
     /// Handle an explain request.
