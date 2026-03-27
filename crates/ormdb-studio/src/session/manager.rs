@@ -66,12 +66,35 @@ impl SessionManager {
 
     /// Create a new session with a temporary database
     pub fn create_session(&self) -> Result<Arc<Session>> {
+        self.create_session_internal(false)
+    }
+
+    /// Create a new demo session with pre-populated movie database
+    pub fn create_demo_session(&self) -> Result<Arc<Session>> {
+        self.create_session_internal(true)
+    }
+
+    /// Internal session creation with optional demo mode
+    fn create_session_internal(&self, demo: bool) -> Result<Arc<Session>> {
         if self.sessions.len() >= self.config.max_sessions {
             return Err(StudioError::TooManySessions(self.config.max_sessions));
         }
 
         let session_id = uuid::Uuid::new_v4().to_string();
         let database = SessionDatabase::new_temporary()?;
+
+        // If demo mode, initialize with demo schema and data
+        if demo {
+            let schema = crate::demo::create_demo_schema();
+            database
+                .catalog()
+                .apply_schema(schema)
+                .map_err(|e| StudioError::Database(format!("failed to apply demo schema: {}", e)))?;
+
+            crate::demo::insert_demo_data(database.storage(), database.catalog())?;
+
+            tracing::info!("Created demo session with movie database");
+        }
 
         let session = Arc::new(Session::new(session_id.clone(), database));
         self.sessions.insert(session_id, session.clone());

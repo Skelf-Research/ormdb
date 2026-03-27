@@ -7,6 +7,7 @@
 //! - Session-isolated databases
 
 pub mod config;
+pub mod demo;
 pub mod error;
 pub mod routes;
 pub mod session;
