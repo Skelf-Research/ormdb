@@ -391,6 +391,145 @@ ormdb admin audit --since 1h \
     --alert slack
 ```
 
+## Security Hardening
+
+ORMDB includes built-in protections against common attack vectors.
+
+### Query Budget Limits
+
+Prevent resource exhaustion via complex queries:
+
+```toml
+# ormdb.toml
+[security]
+# Query depth limits by capability level
+anonymous_max_depth = 2
+authenticated_max_depth = 5
+admin_max_depth = 20
+
+# Entity limits per query
+anonymous_max_entities = 100
+authenticated_max_entities = 10000
+admin_max_entities = 1000000
+```
+
+The server enforces budgets based on the client's capability level:
+
+| Level | Max Depth | Max Entities | Max Edges |
+|-------|-----------|--------------|-----------|
+| Anonymous | 2 | 100 | 500 |
+| Authenticated | 5 | 10,000 | 50,000 |
+| Privileged | 10 | 100,000 | 500,000 |
+| Admin | 20 | 1,000,000 | 5,000,000 |
+
+Queries exceeding these limits return a `BUDGET_EXCEEDED` error.
+
+### Message Size Limits
+
+The protocol enforces a **4 MB** maximum message size to prevent memory exhaustion attacks:
+
+```rust
+// Requests larger than 4 MB are rejected
+const MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+```
+
+### Parser Recursion Limits
+
+The query parser enforces a maximum recursion depth of **100** to prevent stack overflow attacks from deeply nested expressions:
+
+```rust
+// Deeply nested filters are rejected
+const MAX_RECURSION_DEPTH: usize = 100;
+```
+
+### Field Count Limits
+
+Entity payloads are limited to **10,000 fields** to prevent denial-of-service attacks:
+
+```rust
+// Entities with excessive fields are rejected
+const MAX_FIELD_COUNT: usize = 10_000;
+```
+
+### Error Sanitization
+
+Internal error details are logged server-side but not exposed to clients:
+
+```rust
+// Client sees: "database operation failed"
+// Server logs: Full error details with stack trace
+```
+
+This prevents information disclosure while maintaining debuggability.
+
+### Authentication Methods
+
+ORMDB supports multiple authentication methods:
+
+=== "API Key"
+
+    ```bash
+    # Set up API keys via environment
+    ORMDB_API_KEYS="key1:read:*,write:User;key2:admin"
+    ```
+
+    ```rust
+    let request = Request::query(query)
+        .with_credentials("key1");
+    ```
+
+=== "Bearer Token"
+
+    ```bash
+    # Set up tokens via environment
+    ORMDB_TOKENS="token1:read:*;token2:admin"
+    ```
+
+=== "JWT"
+
+    ```toml
+    # ormdb.toml
+    [security]
+    authenticator = "jwt"
+    jwt_secret = "${JWT_SECRET}"  # or jwt_public_key for RS256
+    ```
+
+### TLS Configuration
+
+Enable TLS for encrypted connections:
+
+```toml
+# ormdb.toml
+[tls]
+enabled = true
+cert_path = "/etc/ormdb/cert.pem"
+key_path = "/etc/ormdb/key.pem"
+ca_path = "/etc/ormdb/ca.pem"  # For client cert verification
+require_client_cert = false
+```
+
+### Rate Limiting
+
+Protect against abuse with rate limiting:
+
+```toml
+# ormdb.toml
+[security]
+rate_limit_enabled = true
+rate_limit_requests_per_second = 1000
+rate_limit_burst = 100
+```
+
+### Connection Limits
+
+Limit concurrent connections:
+
+```toml
+# ormdb.toml
+[server]
+max_connections = 1000
+```
+
 ## Security Checklist
 
 - [ ] Enable RLS for multi-tenant applications
@@ -402,6 +541,10 @@ ormdb admin audit --since 1h \
 - [ ] Use HTTPS/TLS for all connections
 - [ ] Validate all user input
 - [ ] Review security policies periodically
+- [ ] Configure appropriate query budget limits
+- [ ] Enable rate limiting in production
+- [ ] Set reasonable connection limits
+- [ ] Monitor audit logs for suspicious activity
 
 ---
 

@@ -90,6 +90,21 @@ format = "json"
 | `enable_field_masking` | boolean | `false` | Enable field masking |
 | `capability_check` | boolean | `true` | Enforce capability tokens |
 | `max_token_age_seconds` | integer | `3600` | Max capability token age |
+| `authenticator` | string | `"dev"` | Authenticator type (`dev`, `apikey`, `token`, `jwt`) |
+| `rate_limit_enabled` | boolean | `false` | Enable rate limiting |
+| `rate_limit_requests_per_second` | integer | `1000` | Requests per second limit |
+| `audit_logging` | boolean | `false` | Enable audit logging |
+| `audit_log_path` | string | none | Audit log file path (uses ORMDB_AUDIT_FILE env var) |
+
+### [tls]
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable TLS encryption |
+| `cert_path` | string | none | Path to TLS certificate |
+| `key_path` | string | none | Path to TLS private key |
+| `ca_path` | string | none | Path to CA certificate (for client verification) |
+| `require_client_cert` | boolean | `false` | Require client certificates |
 
 ### [logging]
 
@@ -129,6 +144,21 @@ ORMDB_QUERY_MAX_ENTITIES=20000
 
 # Security
 ORMDB_SECURITY_ENABLE_RLS=true
+ORMDB_SECURITY_AUTHENTICATOR=jwt
+ORMDB_SECURITY_AUDIT_LOGGING=true
+
+# Authentication
+ORMDB_API_KEYS="key1:read:*,write:User;key2:admin"
+ORMDB_TOKENS="token1:read:*;token2:admin"
+ORMDB_JWT_SECRET="your-jwt-secret-key"
+
+# Audit logging
+ORMDB_AUDIT_FILE=/var/log/ormdb/audit.log
+
+# TLS
+ORMDB_TLS_ENABLED=true
+ORMDB_TLS_CERT_PATH=/etc/ormdb/cert.pem
+ORMDB_TLS_KEY_PATH=/etc/ormdb/key.pem
 
 # Logging
 ORMDB_LOGGING_LEVEL=debug
