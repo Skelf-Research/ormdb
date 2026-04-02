@@ -3,6 +3,50 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// TLS configuration for Raft cluster communication.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RaftTlsConfig {
+    /// Whether TLS is enabled for Raft communication.
+    pub enabled: bool,
+
+    /// Path to the TLS certificate file.
+    pub cert_path: Option<PathBuf>,
+
+    /// Path to the TLS private key file.
+    pub key_path: Option<PathBuf>,
+
+    /// Path to the CA certificate for verifying peer certificates.
+    pub ca_path: Option<PathBuf>,
+
+    /// Whether to require client certificates (mutual TLS).
+    pub require_client_cert: bool,
+}
+
+impl RaftTlsConfig {
+    /// Create a new TLS configuration with certificates.
+    pub fn new(cert_path: PathBuf, key_path: PathBuf) -> Self {
+        Self {
+            enabled: true,
+            cert_path: Some(cert_path),
+            key_path: Some(key_path),
+            ca_path: None,
+            require_client_cert: false,
+        }
+    }
+
+    /// Enable mutual TLS with CA certificate.
+    pub fn with_ca(mut self, ca_path: PathBuf) -> Self {
+        self.ca_path = Some(ca_path);
+        self
+    }
+
+    /// Require client certificates.
+    pub fn with_client_cert_required(mut self) -> Self {
+        self.require_client_cert = true;
+        self
+    }
+}
+
 /// Configuration for a Raft node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RaftConfig {
@@ -32,6 +76,10 @@ pub struct RaftConfig {
 
     /// Directory for Raft data (logs, snapshots).
     pub data_dir: PathBuf,
+
+    /// TLS configuration for cluster communication.
+    #[serde(default)]
+    pub tls: RaftTlsConfig,
 }
 
 impl Default for RaftConfig {
@@ -46,6 +94,7 @@ impl Default for RaftConfig {
             snapshot_threshold: 10000,
             max_entries_per_append: 100,
             data_dir: PathBuf::from("./raft-data"),
+            tls: RaftTlsConfig::default(),
         }
     }
 }
@@ -99,6 +148,18 @@ impl RaftConfig {
     /// Set the data directory.
     pub fn with_data_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.data_dir = dir.into();
+        self
+    }
+
+    /// Set the TLS configuration.
+    pub fn with_tls(mut self, tls: RaftTlsConfig) -> Self {
+        self.tls = tls;
+        self
+    }
+
+    /// Enable TLS with the given certificate and key files.
+    pub fn with_tls_enabled(mut self, cert_path: PathBuf, key_path: PathBuf) -> Self {
+        self.tls = RaftTlsConfig::new(cert_path, key_path);
         self
     }
 }

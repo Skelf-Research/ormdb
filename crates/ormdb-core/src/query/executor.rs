@@ -11,6 +11,10 @@ use tracing::{debug, instrument};
 use crate::catalog::Catalog;
 use crate::error::Error;
 use crate::metrics::{AccessPath, JoinStrategyMetric, SharedMetricsRegistry};
+use crate::security::{
+    combine_filters, FieldMasker, FieldResult, PolicyStore, RlsOperation, RlsPolicyCompiler,
+    SecurityContext,
+};
 use crate::storage::StorageEngine;
 
 use super::cache::{PlanCache, QueryFingerprint};
@@ -22,7 +26,8 @@ use super::statistics::TableStatistics;
 use super::value_codec::{decode_entity, decode_entity_projected};
 
 use ormdb_proto::{
-    ColumnData, Edge, EdgeBlock, EntityBlock, GraphQuery, OrderDirection, QueryResult, Value,
+    ColumnData, Edge, EdgeBlock, EntityBlock, FilterExpr, GraphQuery, OrderDirection, QueryResult,
+    Value,
 };
 
 /// Query executor that runs queries against storage.
@@ -30,6 +35,10 @@ pub struct QueryExecutor<'a> {
     storage: &'a StorageEngine,
     catalog: &'a Catalog,
     metrics: Option<SharedMetricsRegistry>,
+    /// Security context for RLS and field masking.
+    security_context: Option<&'a SecurityContext>,
+    /// Policy store for RLS policy retrieval.
+    policy_store: Option<&'a PolicyStore>,
 }
 
 impl<'a> QueryExecutor<'a> {
@@ -39,6 +48,8 @@ impl<'a> QueryExecutor<'a> {
             storage,
             catalog,
             metrics: None,
+            security_context: None,
+            policy_store: None,
         }
     }
 
@@ -52,7 +63,26 @@ impl<'a> QueryExecutor<'a> {
             storage,
             catalog,
             metrics: Some(metrics),
+            security_context: None,
+            policy_store: None,
         }
+    }
+
+    /// Add a security context for RLS and field masking.
+    pub fn with_security(mut self, context: &'a SecurityContext) -> Self {
+        self.security_context = Some(context);
+        self
+    }
+
+    /// Add a policy store for RLS policy retrieval.
+    pub fn with_policy_store(mut self, store: &'a PolicyStore) -> Self {
+        self.policy_store = Some(store);
+        self
+    }
+
+    /// Check if security context is present.
+    pub fn has_security_context(&self) -> bool {
+        self.security_context.is_some()
     }
 
     /// Execute a GraphQuery and return results.
@@ -200,10 +230,19 @@ impl<'a> QueryExecutor<'a> {
         plan: &QueryPlan,
         statistics: &TableStatistics,
     ) -> Result<QueryResult, Error> {
+        // Apply RLS filters if security context is present
+        let mut plan = plan.clone();
+        self.apply_rls_to_plan(&mut plan);
+
+        // Apply RLS to all includes
+        for include in &mut plan.includes {
+            self.apply_rls_to_include(include);
+        }
+
         let cost_model = CostModel::new(statistics);
 
         // Fetch and filter root entities
-        let mut rows = self.fetch_entities(plan)?;
+        let mut rows = self.fetch_entities(&plan)?;
 
         // Check entity budget
         if rows.len() > plan.budget.max_entities {
@@ -443,8 +482,17 @@ impl<'a> QueryExecutor<'a> {
     /// Execute a pre-planned query.
     #[instrument(skip(self, plan), fields(entity = %plan.root_entity, includes = plan.includes.len()))]
     pub fn execute_plan(&self, plan: &QueryPlan) -> Result<QueryResult, Error> {
+        // Apply RLS filters if security context is present
+        let mut plan = plan.clone();
+        self.apply_rls_to_plan(&mut plan);
+
+        // Apply RLS to all includes
+        for include in &mut plan.includes {
+            self.apply_rls_to_include(include);
+        }
+
         // Fetch and filter root entities
-        let mut rows = self.fetch_entities(plan)?;
+        let mut rows = self.fetch_entities(&plan)?;
 
         // Check entity budget
         if rows.len() > plan.budget.max_entities {
@@ -1103,6 +1151,9 @@ impl<'a> QueryExecutor<'a> {
     }
 
     /// Build an EntityBlock from rows.
+    ///
+    /// If a security context is present, field masking is applied to
+    /// sensitive fields based on the field's security configuration.
     fn build_entity_block(
         &self,
         entity_type: &str,
@@ -1115,13 +1166,23 @@ impl<'a> QueryExecutor<'a> {
 
         let ids: Vec<[u8; 16]> = rows.iter().map(|r| r.id).collect();
 
-        // Determine which fields to include
-        let field_names: Vec<String> = if projected_fields.is_empty() {
+        // Determine which fields to include, filtering out omitted fields
+        let mut field_names: Vec<String> = if projected_fields.is_empty() {
             // Include all fields from the first row
             rows[0].fields.iter().map(|(n, _)| n.clone()).collect()
         } else {
             projected_fields.to_vec()
         };
+
+        // If security context is present, filter out fields that should be omitted
+        if self.security_context.is_some() {
+            field_names.retain(|name| {
+                match self.mask_field_value(entity_type, name, Value::Null) {
+                    FieldResult::Omit => false,
+                    _ => true,
+                }
+            });
+        }
 
         // Build columns by moving values out of rows
         let mut columns: Vec<ColumnData> = field_names
@@ -1140,7 +1201,17 @@ impl<'a> QueryExecutor<'a> {
 
             for (name, value) in row.fields.drain(..) {
                 if let Some(&col_idx) = index.get(name.as_str()) {
-                    columns[col_idx].values[row_idx] = value;
+                    // Apply field masking if security context is present
+                    let final_value = if self.security_context.is_some() {
+                        match self.mask_field_value(entity_type, &name, value) {
+                            FieldResult::Accessible(v) => v,
+                            FieldResult::Masked(v) => v,
+                            FieldResult::Omit => Value::Null, // Already filtered above
+                        }
+                    } else {
+                        value
+                    };
+                    columns[col_idx].values[row_idx] = final_value;
                 }
             }
         }
@@ -1425,6 +1496,63 @@ impl<'a> QueryExecutor<'a> {
             };
             metrics.record_join_strategy(metric);
         }
+    }
+
+    // ============================================================
+    // Security: RLS and Field Masking
+    // ============================================================
+
+    /// Compile RLS filter for an entity based on the security context.
+    ///
+    /// Returns None if:
+    /// - No security context is set
+    /// - No policy store is configured
+    /// - No RLS policies exist for this entity
+    /// - The context bypasses all policies (e.g., admin)
+    fn compile_rls_filter(&self, entity: &str, operation: RlsOperation) -> Option<FilterExpr> {
+        let context = self.security_context?;
+        let store = self.policy_store?;
+
+        // Get policies for this entity
+        let policies = store.get_rls_policies(entity).ok()?;
+        if policies.is_empty() {
+            return None;
+        }
+
+        // Compile policies into a filter expression
+        RlsPolicyCompiler::compile(&policies, context, entity, operation)
+    }
+
+    /// Apply RLS filter to a query plan, merging with any existing filter.
+    fn apply_rls_to_plan(&self, plan: &mut QueryPlan) {
+        if let Some(rls_filter) = self.compile_rls_filter(&plan.root_entity, RlsOperation::Select) {
+            plan.filter = combine_filters(plan.filter.take(), Some(rls_filter));
+        }
+    }
+
+    /// Apply RLS filter to an include plan, merging with any existing filter.
+    fn apply_rls_to_include(&self, include: &mut IncludePlan) {
+        if let Some(rls_filter) = self.compile_rls_filter(include.target_entity(), RlsOperation::Select) {
+            include.filter = combine_filters(include.filter.take(), Some(rls_filter));
+        }
+    }
+
+    /// Get field security configuration for an entity field.
+    fn get_field_security(&self, entity: &str, field: &str) -> Option<crate::security::FieldSecurity> {
+        let entity_def = self.catalog.get_entity(entity).ok()??;
+        let field_def = entity_def.fields.iter().find(|f| f.name == field)?;
+        field_def.security.clone()
+    }
+
+    /// Apply field masking to a value based on security context.
+    fn mask_field_value(&self, entity: &str, field: &str, value: Value) -> FieldResult {
+        let context = match self.security_context {
+            Some(ctx) => ctx,
+            None => return FieldResult::Accessible(value),
+        };
+
+        let security = self.get_field_security(entity, field);
+        FieldMasker::process_field(&value, &security, context)
     }
 }
 

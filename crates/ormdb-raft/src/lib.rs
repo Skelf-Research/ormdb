@@ -42,7 +42,7 @@ pub mod types;
 
 // Re-export main types
 pub use cluster::manager::RaftClusterManager;
-pub use config::{ClusterConfig, NodeMember, RaftConfig};
+pub use config::{ClusterConfig, NodeMember, RaftConfig, RaftTlsConfig};
 pub use error::RaftError;
 pub use types::{ClientRequest, ClientResponse, NodeId, TypeConfig};
 

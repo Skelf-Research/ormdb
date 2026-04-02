@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
+use nng::options::Options;
 use nng::{Protocol, Socket};
 use openraft::raft::{
     AppendEntriesRequest as OpenraftAppendRequest, VoteRequest as OpenraftVoteRequest,
 };
 use tokio::sync::oneshot;
 
+use crate::config::RaftTlsConfig;
 use crate::error::RaftError;
 use crate::network::messages::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotResponse, RaftMessage,
@@ -26,6 +28,8 @@ pub struct RaftTransport {
     listen_addr: String,
     /// The Raft instance to dispatch to.
     raft: Arc<OrmdbRaft>,
+    /// TLS configuration.
+    tls_config: Option<RaftTlsConfig>,
 }
 
 impl RaftTransport {
@@ -35,7 +39,51 @@ impl RaftTransport {
             node_id,
             listen_addr: listen_addr.into(),
             raft,
+            tls_config: None,
         }
+    }
+
+    /// Create a new Raft transport server with TLS.
+    pub fn with_tls(
+        node_id: NodeId,
+        listen_addr: impl Into<String>,
+        raft: Arc<OrmdbRaft>,
+        tls_config: RaftTlsConfig,
+    ) -> Self {
+        Self {
+            node_id,
+            listen_addr: listen_addr.into(),
+            raft,
+            tls_config: if tls_config.enabled { Some(tls_config) } else { None },
+        }
+    }
+
+    /// Check if TLS is enabled.
+    pub fn is_tls_enabled(&self) -> bool {
+        self.tls_config.as_ref().map(|c| c.enabled).unwrap_or(false)
+    }
+
+    /// Configure TLS on the socket.
+    fn configure_tls(&self, socket: &Socket) -> Result<(), RaftError> {
+        if let Some(ref tls) = self.tls_config {
+            if tls.enabled {
+                // Set certificate and key
+                if let (Some(cert_path), Some(key_path)) = (&tls.cert_path, &tls.key_path) {
+                    let cert_key_path = format!("{}:{}", cert_path.display(), key_path.display());
+                    socket
+                        .set_opt::<nng::options::transport::tls::CertKeyFile>(cert_key_path)
+                        .map_err(|e| RaftError::Network(format!("Failed to set TLS cert/key: {}", e)))?;
+                }
+
+                // Set CA certificate for peer verification
+                if let Some(ca_path) = &tls.ca_path {
+                    socket
+                        .set_opt::<nng::options::transport::tls::CaFile>(ca_path.display().to_string())
+                        .map_err(|e| RaftError::Network(format!("Failed to set TLS CA: {}", e)))?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Run the transport server synchronously.
@@ -45,15 +93,24 @@ impl RaftTransport {
         let socket = Socket::new(Protocol::Rep0)
             .map_err(|e| RaftError::Network(format!("Failed to create socket: {}", e)))?;
 
-        let addr = format!("tcp://{}", self.listen_addr);
+        // Configure TLS if enabled
+        self.configure_tls(&socket)?;
+
+        // Use TLS scheme if enabled
+        let addr = if self.is_tls_enabled() {
+            format!("tls+tcp://{}", self.listen_addr)
+        } else {
+            format!("tcp://{}", self.listen_addr)
+        };
         socket
             .listen(&addr)
             .map_err(|e| RaftError::Network(format!("Failed to listen on {}: {}", addr, e)))?;
 
         tracing::info!(
-            "Raft transport server started on {} for node {}",
+            "Raft transport server started on {} for node {} (TLS: {})",
             addr,
-            self.node_id
+            self.node_id,
+            self.is_tls_enabled()
         );
 
         let raft = self.raft.clone();
@@ -236,6 +293,27 @@ pub fn spawn_transport(
 
     let handle = tokio::task::spawn_blocking(move || {
         let transport = RaftTransport::new(node_id, listen_addr, raft);
+        transport.run_sync(shutdown_rx)
+    });
+
+    (handle, shutdown_tx)
+}
+
+/// Spawn the Raft transport server as a background task with TLS.
+pub fn spawn_transport_with_tls(
+    node_id: NodeId,
+    listen_addr: impl Into<String>,
+    raft: Arc<OrmdbRaft>,
+    tls_config: RaftTlsConfig,
+) -> (
+    tokio::task::JoinHandle<Result<(), RaftError>>,
+    oneshot::Sender<()>,
+) {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let listen_addr = listen_addr.into();
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let transport = RaftTransport::with_tls(node_id, listen_addr, raft, tls_config);
         transport.run_sync(shutdown_rx)
     });
 

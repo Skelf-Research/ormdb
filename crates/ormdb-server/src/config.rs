@@ -1,12 +1,131 @@
 //! Server configuration.
 
 use clap::Parser;
+use clap::ValueEnum;
 use ormdb_core::storage::RetentionPolicy;
 use std::path::PathBuf;
 use std::time::Duration;
 
 #[cfg(feature = "raft")]
 use ormdb_raft::RaftConfig;
+
+/// Authentication method to use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum AuthMethod {
+    /// Development mode - grants full admin access (NOT for production).
+    #[default]
+    Dev,
+    /// API Key authentication (from ORMDB_API_KEYS environment variable).
+    ApiKey,
+    /// Bearer token authentication (from ORMDB_TOKENS environment variable).
+    Token,
+    /// JWT authentication (from ORMDB_JWT_SECRET environment variable).
+    Jwt,
+}
+
+/// TLS configuration for secure transport.
+#[derive(Debug, Clone, Default)]
+pub struct TlsConfig {
+    /// Enable TLS for client connections.
+    pub enabled: bool,
+    /// Path to certificate file (PEM format).
+    pub cert_path: Option<PathBuf>,
+    /// Path to private key file (PEM format).
+    pub key_path: Option<PathBuf>,
+    /// Path to CA certificate for client verification (optional).
+    pub ca_path: Option<PathBuf>,
+    /// Require client certificate verification.
+    pub require_client_cert: bool,
+}
+
+impl TlsConfig {
+    /// Create a new TLS config with certificate and key.
+    pub fn new(cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self {
+        Self {
+            enabled: true,
+            cert_path: Some(cert_path.into()),
+            key_path: Some(key_path.into()),
+            ca_path: None,
+            require_client_cert: false,
+        }
+    }
+
+    /// Set CA certificate for client verification.
+    pub fn with_ca(mut self, ca_path: impl Into<PathBuf>) -> Self {
+        self.ca_path = Some(ca_path.into());
+        self
+    }
+
+    /// Require client certificate verification.
+    pub fn require_client_cert(mut self) -> Self {
+        self.require_client_cert = true;
+        self
+    }
+}
+
+/// Rate limiting configuration.
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// Maximum requests per second per client.
+    pub requests_per_second: u32,
+    /// Burst size (requests allowed above rate limit).
+    pub burst_size: u32,
+    /// Enable rate limiting.
+    pub enabled: bool,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_second: 1000,
+            burst_size: 100,
+            enabled: false,
+        }
+    }
+}
+
+impl RateLimitConfig {
+    /// Create a new rate limit config.
+    pub fn new(requests_per_second: u32, burst_size: u32) -> Self {
+        Self {
+            requests_per_second,
+            burst_size,
+            enabled: true,
+        }
+    }
+}
+
+/// Connection limits configuration.
+#[derive(Debug, Clone)]
+pub struct ConnectionLimits {
+    /// Maximum concurrent connections.
+    pub max_connections: u32,
+    /// Connection timeout in seconds.
+    pub connection_timeout_secs: u64,
+    /// Enable connection limits.
+    pub enabled: bool,
+}
+
+impl Default for ConnectionLimits {
+    fn default() -> Self {
+        Self {
+            max_connections: 10000,
+            connection_timeout_secs: 300,
+            enabled: false,
+        }
+    }
+}
+
+impl ConnectionLimits {
+    /// Create a new connection limits config.
+    pub fn new(max_connections: u32) -> Self {
+        Self {
+            max_connections,
+            connection_timeout_secs: 300,
+            enabled: true,
+        }
+    }
+}
 
 /// Default TCP address for the server.
 pub const DEFAULT_TCP_ADDRESS: &str = "tcp://0.0.0.0:9000";
@@ -54,6 +173,18 @@ pub struct ServerConfig {
     /// Number of transport worker loops (AsyncContext instances).
     pub transport_workers: usize,
 
+    /// Authentication method to use.
+    pub auth_method: AuthMethod,
+
+    /// TLS configuration for client connections.
+    pub tls: TlsConfig,
+
+    /// Rate limiting configuration.
+    pub rate_limit: RateLimitConfig,
+
+    /// Connection limits configuration.
+    pub connection_limits: ConnectionLimits,
+
     /// Raft configuration for cluster mode. None for standalone mode.
     #[cfg(feature = "raft")]
     pub raft_config: Option<RaftConfig>,
@@ -79,6 +210,10 @@ impl ServerConfig {
             retention_policy: RetentionPolicy::default(),
             compaction_interval: Some(Duration::from_secs(DEFAULT_COMPACTION_INTERVAL_SECS)),
             transport_workers: default_transport_workers(),
+            auth_method: AuthMethod::Dev,
+            tls: TlsConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            connection_limits: ConnectionLimits::default(),
             #[cfg(feature = "raft")]
             raft_config: None,
             #[cfg(feature = "raft")]
@@ -86,6 +221,30 @@ impl ServerConfig {
             #[cfg(feature = "raft")]
             cluster_members: Vec::new(),
         }
+    }
+
+    /// Set the authentication method.
+    pub fn with_auth_method(mut self, method: AuthMethod) -> Self {
+        self.auth_method = method;
+        self
+    }
+
+    /// Set TLS configuration.
+    pub fn with_tls(mut self, tls: TlsConfig) -> Self {
+        self.tls = tls;
+        self
+    }
+
+    /// Set rate limiting configuration.
+    pub fn with_rate_limit(mut self, rate_limit: RateLimitConfig) -> Self {
+        self.rate_limit = rate_limit;
+        self
+    }
+
+    /// Set connection limits configuration.
+    pub fn with_connection_limits(mut self, limits: ConnectionLimits) -> Self {
+        self.connection_limits = limits;
+        self
     }
 
     /// Set the TCP address.
@@ -213,6 +372,47 @@ pub struct Args {
     #[arg(long, default_value_t = 0)]
     pub workers: usize,
 
+    /// Authentication method: dev (no auth), api-key, token, jwt.
+    /// Note: 'dev' mode grants full admin access and should NOT be used in production.
+    #[arg(long, value_enum, default_value_t = AuthMethod::Dev)]
+    pub auth: AuthMethod,
+
+    /// Enable TLS for client connections.
+    #[arg(long)]
+    pub tls: bool,
+
+    /// Path to TLS certificate file (PEM format).
+    #[arg(long, requires = "tls")]
+    pub tls_cert: Option<PathBuf>,
+
+    /// Path to TLS private key file (PEM format).
+    #[arg(long, requires = "tls")]
+    pub tls_key: Option<PathBuf>,
+
+    /// Path to CA certificate for client verification (optional).
+    #[arg(long)]
+    pub tls_ca: Option<PathBuf>,
+
+    /// Require client certificate verification.
+    #[arg(long)]
+    pub tls_require_client_cert: bool,
+
+    /// Enable rate limiting.
+    #[arg(long)]
+    pub rate_limit: bool,
+
+    /// Maximum requests per second (requires --rate-limit).
+    #[arg(long, default_value_t = 1000)]
+    pub rate_limit_rps: u32,
+
+    /// Rate limit burst size (requires --rate-limit).
+    #[arg(long, default_value_t = 100)]
+    pub rate_limit_burst: u32,
+
+    /// Maximum concurrent connections (0 = unlimited).
+    #[arg(long, default_value_t = 0)]
+    pub max_connections: u32,
+
     /// Enable Raft cluster mode with the given node ID.
     #[cfg(feature = "raft")]
     #[arg(long)]
@@ -273,6 +473,33 @@ impl Args {
             .map(|s| parse_cluster_members(&s))
             .unwrap_or_default();
 
+        // Build TLS config
+        let tls = if self.tls {
+            TlsConfig {
+                enabled: true,
+                cert_path: self.tls_cert,
+                key_path: self.tls_key,
+                ca_path: self.tls_ca,
+                require_client_cert: self.tls_require_client_cert,
+            }
+        } else {
+            TlsConfig::default()
+        };
+
+        // Build rate limit config
+        let rate_limit = if self.rate_limit {
+            RateLimitConfig::new(self.rate_limit_rps, self.rate_limit_burst)
+        } else {
+            RateLimitConfig::default()
+        };
+
+        // Build connection limits config
+        let connection_limits = if self.max_connections > 0 {
+            ConnectionLimits::new(self.max_connections)
+        } else {
+            ConnectionLimits::default()
+        };
+
         ServerConfig {
             tcp_address,
             ipc_address: self.ipc,
@@ -282,6 +509,10 @@ impl Args {
             retention_policy,
             compaction_interval,
             transport_workers,
+            auth_method: self.auth,
+            tls,
+            rate_limit,
+            connection_limits,
             #[cfg(feature = "raft")]
             raft_config,
             #[cfg(feature = "raft")]

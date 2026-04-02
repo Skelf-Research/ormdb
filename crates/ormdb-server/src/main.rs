@@ -6,7 +6,11 @@ use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use ormdb_core::metrics::new_shared_registry;
-use ormdb_server::{create_transport, Args, CompactionTask, Database, RequestHandler};
+use ormdb_core::security::{CapabilityAuthenticator, DevAuthenticator};
+use ormdb_server::{
+    create_transport, ApiKeyAuthenticator, Args, AuthMethod, CompactionTask, Database,
+    JwtAuthenticator, RequestHandler, TokenAuthenticator,
+};
 
 #[cfg(feature = "raft")]
 use ormdb_raft::RaftClusterManager;
@@ -83,20 +87,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // Create authenticator based on configuration
+    let authenticator: Arc<dyn CapabilityAuthenticator + Send + Sync> = match config.auth_method {
+        AuthMethod::Dev => {
+            tracing::warn!("running in DEV mode - all requests have admin access. DO NOT USE IN PRODUCTION.");
+            Arc::new(DevAuthenticator)
+        }
+        AuthMethod::ApiKey => {
+            let auth = ApiKeyAuthenticator::from_default_env();
+            let key_count = auth.key_count();
+            if key_count == 0 {
+                tracing::warn!("API key auth enabled but no keys configured. Set ORMDB_API_KEYS environment variable.");
+            } else {
+                tracing::info!(key_count, "API key authentication enabled");
+            }
+            Arc::new(auth)
+        }
+        AuthMethod::Token => {
+            let auth = TokenAuthenticator::from_default_env();
+            let token_count = auth.token_count();
+            if token_count == 0 {
+                tracing::warn!("token auth enabled but no tokens configured. Set ORMDB_TOKENS environment variable.");
+            } else {
+                tracing::info!(token_count, "token authentication enabled");
+            }
+            Arc::new(auth)
+        }
+        AuthMethod::Jwt => {
+            match JwtAuthenticator::from_env() {
+                Ok(auth) => {
+                    tracing::info!("JWT authentication enabled");
+                    Arc::new(auth)
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to initialize JWT authenticator");
+                    return Err(e.into());
+                }
+            }
+        }
+    };
+
     // Create request handler
     let metrics = new_shared_registry();
     #[cfg(feature = "raft")]
     let handler = if raft_manager.is_some() {
-        Arc::new(RequestHandler::with_metrics_and_raft(
+        Arc::new(RequestHandler::with_full_config(
             database.clone(),
             metrics,
+            authenticator,
             raft_manager.clone(),
         ))
     } else {
-        Arc::new(RequestHandler::with_metrics(database.clone(), metrics))
+        Arc::new(RequestHandler::with_metrics_and_authenticator(
+            database.clone(),
+            metrics,
+            authenticator,
+        ))
     };
     #[cfg(not(feature = "raft"))]
-    let handler = Arc::new(RequestHandler::with_metrics(database.clone(), metrics));
+    let handler = Arc::new(RequestHandler::with_metrics_and_authenticator(
+        database.clone(),
+        metrics,
+        authenticator,
+    ));
 
     // Start background compaction if enabled
     let compaction_task = config

@@ -14,6 +14,7 @@ use openraft::raft::{
 use openraft::storage::Snapshot;
 use openraft::{BasicNode, Vote};
 
+use crate::config::RaftTlsConfig;
 use crate::error::RaftError as OrmdbRaftError;
 use crate::network::messages::{
     AppendEntriesRequest, InstallSnapshotRequest, NetworkSnapshotMeta, RaftMessage,
@@ -32,6 +33,8 @@ pub struct NngRaftNetwork {
     pub target_id: NodeId,
     /// Request timeout.
     timeout: Duration,
+    /// TLS configuration.
+    tls_config: Option<RaftTlsConfig>,
 }
 
 impl NngRaftNetwork {
@@ -41,6 +44,17 @@ impl NngRaftNetwork {
             target,
             target_id,
             timeout: Duration::from_secs(5),
+            tls_config: None,
+        }
+    }
+
+    /// Create a new NNG network connection with TLS.
+    pub fn with_tls(target_id: NodeId, target: BasicNode, tls_config: RaftTlsConfig) -> Self {
+        Self {
+            target,
+            target_id,
+            timeout: Duration::from_secs(5),
+            tls_config: if tls_config.enabled { Some(tls_config) } else { None },
         }
     }
 
@@ -50,9 +64,41 @@ impl NngRaftNetwork {
         self
     }
 
+    /// Check if TLS is enabled.
+    pub fn is_tls_enabled(&self) -> bool {
+        self.tls_config.as_ref().map(|c| c.enabled).unwrap_or(false)
+    }
+
     /// Get the target's Raft address.
     fn raft_addr(&self) -> String {
-        format!("tcp://{}", self.target.addr)
+        if self.is_tls_enabled() {
+            format!("tls+tcp://{}", self.target.addr)
+        } else {
+            format!("tcp://{}", self.target.addr)
+        }
+    }
+
+    /// Configure TLS on the socket.
+    fn configure_tls(&self, socket: &Socket) -> Result<(), OrmdbRaftError> {
+        if let Some(ref tls) = self.tls_config {
+            if tls.enabled {
+                // Set certificate and key
+                if let (Some(cert_path), Some(key_path)) = (&tls.cert_path, &tls.key_path) {
+                    let cert_key_path = format!("{}:{}", cert_path.display(), key_path.display());
+                    socket
+                        .set_opt::<nng::options::transport::tls::CertKeyFile>(cert_key_path)
+                        .map_err(|e| OrmdbRaftError::Network(format!("Failed to set TLS cert/key: {}", e)))?;
+                }
+
+                // Set CA certificate for peer verification
+                if let Some(ca_path) = &tls.ca_path {
+                    socket
+                        .set_opt::<nng::options::transport::tls::CaFile>(ca_path.display().to_string())
+                        .map_err(|e| OrmdbRaftError::Network(format!("Failed to set TLS CA: {}", e)))?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Send a message and receive response synchronously.
@@ -60,6 +106,9 @@ impl NngRaftNetwork {
         // Create REQ socket for RPC
         let socket = Socket::new(Protocol::Req0)
             .map_err(|e| OrmdbRaftError::Network(format!("Failed to create socket: {}", e)))?;
+
+        // Configure TLS if enabled
+        self.configure_tls(&socket)?;
 
         // Set timeouts
         socket
@@ -102,12 +151,14 @@ impl NngRaftNetwork {
         let target = self.target.clone();
         let target_id = self.target_id;
         let timeout = self.timeout;
+        let tls_config = self.tls_config.clone();
 
         tokio::task::spawn_blocking(move || {
             let network = NngRaftNetwork {
                 target,
                 target_id,
                 timeout,
+                tls_config,
             };
             network.send_message_sync(&msg)
         })
@@ -279,6 +330,7 @@ impl RaftNetwork<TypeConfig> for NngRaftNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_raft_addr() {
@@ -292,6 +344,26 @@ mod tests {
     }
 
     #[test]
+    fn test_raft_addr_with_tls() {
+        let tls_config = RaftTlsConfig {
+            enabled: true,
+            cert_path: Some(PathBuf::from("/path/to/cert.pem")),
+            key_path: Some(PathBuf::from("/path/to/key.pem")),
+            ca_path: None,
+            require_client_cert: false,
+        };
+        let network = NngRaftNetwork::with_tls(
+            1,
+            BasicNode {
+                addr: "192.168.1.10:9001".to_string(),
+            },
+            tls_config,
+        );
+        assert_eq!(network.raft_addr(), "tls+tcp://192.168.1.10:9001");
+        assert!(network.is_tls_enabled());
+    }
+
+    #[test]
     fn test_timeout_configuration() {
         let network = NngRaftNetwork::new(
             1,
@@ -302,5 +374,16 @@ mod tests {
         .with_timeout(Duration::from_secs(10));
 
         assert_eq!(network.timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_tls_disabled_by_default() {
+        let network = NngRaftNetwork::new(
+            1,
+            BasicNode {
+                addr: "localhost:9001".to_string(),
+            },
+        );
+        assert!(!network.is_tls_enabled());
     }
 }

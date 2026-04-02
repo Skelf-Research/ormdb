@@ -53,21 +53,24 @@ pub use context::SecurityContext;
 
 // Capability types
 pub use capability::{
-    Capability, CapabilityAuthenticator, CapabilitySet, DefaultAuthenticator, EntityScope,
-    SensitiveLevel,
+    Capability, CapabilityAuthenticator, CapabilitySet, DefaultAuthenticator, DevAuthenticator,
+    EntityScope, SensitiveLevel,
 };
 
 // Field security types
 pub use field_security::{FieldMasker, FieldResult, FieldSecurity, FieldSensitivity, MaskingStrategy};
 
 // RLS types
-pub use rls::{PolicyType, RlsFilterExpr, RlsOperation, RlsPolicy, RlsPolicyCompiler};
+pub use rls::{combine_filters, PolicyType, RlsFilterExpr, RlsOperation, RlsPolicy, RlsPolicyCompiler};
 
 // Budget types
 pub use budget::{CapabilityLevel, SecurityBudget};
 
 // Audit types
-pub use audit::{AuditEvent, AuditEventType, AuditLogger, MemoryAuditLogger};
+pub use audit::{
+    AuditError, AuditEvent, AuditEventType, AuditLogger, FileAuditLogger, MemoryAuditLogger,
+    MutationOp, NullAuditLogger, StderrAuditLogger,
+};
 
 // Policy storage
 pub use policy::PolicyStore;

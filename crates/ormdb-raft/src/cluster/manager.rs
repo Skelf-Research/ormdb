@@ -11,7 +11,7 @@ use ormdb_core::storage::StorageEngine;
 use crate::config::RaftConfig;
 use crate::error::RaftError;
 use crate::network::factory::NngNetworkFactory;
-use crate::network::server::spawn_transport;
+use crate::network::server::{spawn_transport, spawn_transport_with_tls};
 use crate::storage::log_storage::SledRaftLogStorage;
 use crate::storage::state_machine::{ApplyMutationFn, OrmdbStateMachine};
 use crate::types::{ClientRequest, ClientResponse, NodeId, OrmdbRaft, TypeConfig};
@@ -83,8 +83,12 @@ impl RaftClusterManager {
             .map_err(|e| RaftError::Initialization(e.to_string()))?,
         );
 
-        // Create network factory
-        let network = NngNetworkFactory::new(config.node_id);
+        // Create network factory with TLS if configured
+        let network = if config.tls.enabled {
+            NngNetworkFactory::with_tls(config.node_id, config.tls.clone())
+        } else {
+            NngNetworkFactory::new(config.node_id)
+        };
 
         // Create Raft instance
         let raft = Raft::new(
@@ -99,9 +103,17 @@ impl RaftClusterManager {
 
         let raft = Arc::new(raft);
 
-        // Start transport server
-        let (_, shutdown_tx) =
-            spawn_transport(config.node_id, &config.raft_listen_addr, raft.clone());
+        // Start transport server (with TLS if configured)
+        let (_, shutdown_tx) = if config.tls.enabled {
+            spawn_transport_with_tls(
+                config.node_id,
+                &config.raft_listen_addr,
+                raft.clone(),
+                config.tls.clone(),
+            )
+        } else {
+            spawn_transport(config.node_id, &config.raft_listen_addr, raft.clone())
+        };
 
         Ok(Self {
             node_id: config.node_id,
@@ -248,7 +260,7 @@ impl RaftClusterManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::RaftConfig;
+    use crate::config::{RaftConfig, RaftTlsConfig};
     use ormdb_core::StorageConfig;
     use std::path::PathBuf;
 
@@ -263,6 +275,7 @@ mod tests {
             snapshot_threshold: 1000,
             max_entries_per_append: 100,
             data_dir: PathBuf::from("/tmp/ormdb-test"),
+            tls: RaftTlsConfig::default(),
         }
     }
 

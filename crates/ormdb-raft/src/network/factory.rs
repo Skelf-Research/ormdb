@@ -3,6 +3,7 @@
 use openraft::network::RaftNetworkFactory;
 use openraft::BasicNode;
 
+use crate::config::RaftTlsConfig;
 use crate::network::transport::NngRaftNetwork;
 use crate::types::{NodeId, TypeConfig};
 
@@ -13,12 +14,25 @@ use crate::types::{NodeId, TypeConfig};
 pub struct NngNetworkFactory {
     /// This node's ID.
     node_id: NodeId,
+    /// TLS configuration for connections.
+    tls_config: Option<RaftTlsConfig>,
 }
 
 impl NngNetworkFactory {
     /// Create a new network factory.
     pub fn new(node_id: NodeId) -> Self {
-        Self { node_id }
+        Self {
+            node_id,
+            tls_config: None,
+        }
+    }
+
+    /// Create a new network factory with TLS configuration.
+    pub fn with_tls(node_id: NodeId, tls_config: RaftTlsConfig) -> Self {
+        Self {
+            node_id,
+            tls_config: if tls_config.enabled { Some(tls_config) } else { None },
+        }
     }
 }
 
@@ -27,12 +41,18 @@ impl RaftNetworkFactory<TypeConfig> for NngNetworkFactory {
 
     async fn new_client(&mut self, target: NodeId, node: &BasicNode) -> Self::Network {
         tracing::debug!(
-            "Creating network client from node {} to node {} at {}",
+            "Creating network client from node {} to node {} at {} (TLS: {})",
             self.node_id,
             target,
-            node.addr
+            node.addr,
+            self.tls_config.is_some()
         );
-        NngRaftNetwork::new(target, node.clone())
+
+        if let Some(ref tls) = self.tls_config {
+            NngRaftNetwork::with_tls(target, node.clone(), tls.clone())
+        } else {
+            NngRaftNetwork::new(target, node.clone())
+        }
     }
 }
 

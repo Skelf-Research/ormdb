@@ -12,6 +12,7 @@ use ormdb_core::catalog::Catalog;
 use ormdb_core::metrics::SharedMetricsRegistry;
 use ormdb_core::query::{PlanCache, QueryExecutor, TableStatistics};
 use ormdb_core::replication::ChangeLog;
+use ormdb_core::security::PolicyStore;
 use ormdb_core::storage::{
     ColumnarStore, CompactionEngine, CompactionResult, RetentionPolicy, StorageConfig,
     StorageEngine,
@@ -27,6 +28,8 @@ pub struct Database {
     plan_cache: PlanCache,
     columnar: ColumnarStore,
     changelog: ChangeLog,
+    /// Policy store for RLS policies.
+    policy_store: PolicyStore,
     /// Keep the sled::Db handle alive for the catalog.
     _catalog_db: sled::Db,
     /// Retention policy for compaction.
@@ -67,6 +70,10 @@ impl Database {
         let changelog = ChangeLog::open(storage.db())
             .map_err(|e| Error::Database(format!("failed to open changelog: {}", e)))?;
 
+        // Open policy store (uses catalog sled Db)
+        let policy_store = PolicyStore::open(&catalog_db)
+            .map_err(|e| Error::Database(format!("failed to open policy store: {}", e)))?;
+
         let db = Self {
             storage,
             catalog,
@@ -74,6 +81,7 @@ impl Database {
             plan_cache: PlanCache::new(1000), // 1000 entry cache
             columnar,
             changelog,
+            policy_store,
             _catalog_db: catalog_db,
             retention_policy,
         };
@@ -129,6 +137,11 @@ impl Database {
         &self.changelog
     }
 
+    /// Get a reference to the policy store.
+    pub fn policy_store(&self) -> &PolicyStore {
+        &self.policy_store
+    }
+
     /// Create a query executor for this database.
     pub fn executor(&self) -> QueryExecutor<'_> {
         QueryExecutor::new(&self.storage, &self.catalog)
@@ -137,6 +150,27 @@ impl Database {
     /// Create a query executor with metrics tracking.
     pub fn executor_with_metrics(&self, metrics: SharedMetricsRegistry) -> QueryExecutor<'_> {
         QueryExecutor::with_metrics(&self.storage, &self.catalog, metrics)
+    }
+
+    /// Create a query executor with security context.
+    pub fn executor_with_security<'a>(
+        &'a self,
+        context: &'a ormdb_core::security::SecurityContext,
+    ) -> QueryExecutor<'a> {
+        QueryExecutor::new(&self.storage, &self.catalog)
+            .with_security(context)
+            .with_policy_store(&self.policy_store)
+    }
+
+    /// Create a query executor with metrics and security context.
+    pub fn executor_with_metrics_and_security<'a>(
+        &'a self,
+        metrics: SharedMetricsRegistry,
+        context: &'a ormdb_core::security::SecurityContext,
+    ) -> QueryExecutor<'a> {
+        QueryExecutor::with_metrics(&self.storage, &self.catalog, metrics)
+            .with_security(context)
+            .with_policy_store(&self.policy_store)
     }
 
     /// Get the current schema version.

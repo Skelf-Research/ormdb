@@ -5,8 +5,9 @@
 
 use crate::Error;
 
-/// Maximum message size (64 MB).
-pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+/// Maximum message size (4 MB) for security hardening.
+/// Large payloads could be used for DoS attacks.
+pub const MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
 /// Size of the length prefix in bytes.
 pub const LENGTH_PREFIX_SIZE: usize = 4;

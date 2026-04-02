@@ -18,6 +18,12 @@ pub struct Request {
     pub schema_version: u64,
     /// The operation to perform.
     pub operation: Operation,
+    /// Authentication credentials (API key, bearer token, or JWT).
+    #[serde(default)]
+    pub credentials: Option<String>,
+    /// Client identifier for audit logging.
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 /// Operations that can be requested.
@@ -74,6 +80,8 @@ impl Request {
             id,
             schema_version,
             operation: Operation::Query(query),
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -83,6 +91,8 @@ impl Request {
             id,
             schema_version,
             operation: Operation::Mutate(mutation),
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -92,6 +102,8 @@ impl Request {
             id,
             schema_version,
             operation: Operation::MutateBatch(batch),
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -101,6 +113,8 @@ impl Request {
             id,
             schema_version: 0, // Not relevant for schema fetch
             operation: Operation::GetSchema,
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -110,6 +124,8 @@ impl Request {
             id,
             schema_version: 0,
             operation: Operation::Ping,
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -119,6 +135,8 @@ impl Request {
             id,
             schema_version,
             operation: Operation::Subscribe(subscription),
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -128,6 +146,8 @@ impl Request {
             id,
             schema_version: 0,
             operation: Operation::Unsubscribe { subscription_id },
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -137,6 +157,8 @@ impl Request {
             id,
             schema_version,
             operation: Operation::Explain(query),
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -146,6 +168,8 @@ impl Request {
             id,
             schema_version: 0,
             operation: Operation::GetMetrics,
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -155,6 +179,8 @@ impl Request {
             id,
             schema_version,
             operation: Operation::Aggregate(query),
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -164,6 +190,8 @@ impl Request {
             id,
             schema_version: 0,
             operation: Operation::StreamChanges(request),
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -173,6 +201,8 @@ impl Request {
             id,
             schema_version: 0,
             operation: Operation::GetReplicationStatus,
+            credentials: None,
+            client_id: None,
         }
     }
 
@@ -182,7 +212,21 @@ impl Request {
             id,
             schema_version: 0,
             operation: Operation::ApplySchema(schema_bytes),
+            credentials: None,
+            client_id: None,
         }
+    }
+
+    /// Set authentication credentials on this request.
+    pub fn with_credentials(mut self, credentials: impl Into<String>) -> Self {
+        self.credentials = Some(credentials.into());
+        self
+    }
+
+    /// Set client identifier on this request.
+    pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
+        self.client_id = Some(client_id.into());
+        self
     }
 }
 
@@ -467,7 +511,7 @@ pub mod error_codes {
     pub const CONSTRAINT_VIOLATION: u32 = 4;
     /// Schema version mismatch.
     pub const SCHEMA_MISMATCH: u32 = 5;
-    /// Permission denied.
+    /// Permission denied (authorization failed).
     pub const PERMISSION_DENIED: u32 = 6;
     /// Transaction conflict.
     pub const CONFLICT: u32 = 7;
@@ -479,6 +523,8 @@ pub mod error_codes {
     pub const READ_ONLY_REPLICA: u32 = 10;
     /// Invalid LSN in replication request.
     pub const INVALID_LSN: u32 = 11;
+    /// Authentication failed (invalid credentials).
+    pub const AUTHENTICATION_FAILED: u32 = 12;
 }
 
 #[cfg(test)]

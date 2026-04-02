@@ -28,4 +28,8 @@ pub enum Error {
     /// IO error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// Security error (authentication/authorization).
+    #[error("security error: {0}")]
+    Security(#[from] ormdb_core::security::SecurityError),
 }
