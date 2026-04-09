@@ -14,8 +14,8 @@ set -o pipefail
 # ============================================
 # Configuration
 # ============================================
-REPO="Skelf-Research/ormdb"
-HOMEBREW_TAP="Skelf-Research/homebrew-ormdb"
+REPO="incredlabs/ormdb"
+HOMEBREW_TAP="incredlabs/homebrew-ormdb"
 SLEEP_DURATION=30
 
 # Crates in dependency order
@@ -90,7 +90,7 @@ Publishing Targets:
     - npm           @ormdb/client TypeScript package
     - PyPI          ormdb Python package
     - gem           Placeholder (Ruby client not yet available)
-    - Homebrew      Skelf-Research/homebrew-ormdb tap
+    - Homebrew      incredlabs/homebrew-ormdb tap
 
 Examples:
     # Full release

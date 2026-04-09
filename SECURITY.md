@@ -76,7 +76,7 @@ When deploying ORMDB in production:
 
 Security updates are released as patch versions. We recommend:
 
-- Subscribing to our [security advisories](https://github.com/Skelf-Research/ormdb/security/advisories)
+- Subscribing to our [security advisories](https://github.com/incredlabs/ormdb/security/advisories)
 - Enabling automatic updates for patch versions
 - Testing updates in a staging environment before production
 

@@ -53,8 +53,8 @@ Documentation for deploying, managing, and operating ORMDB in production.
 
 ## Support Resources
 
-- [GitHub Issues](https://github.com/Skelf-Research/ormdb/issues) - Bug reports and feature requests
-- [Discussions](https://github.com/Skelf-Research/ormdb/discussions) - Questions and community support
+- [GitHub Issues](https://github.com/incredlabs/ormdb/issues) - Bug reports and feature requests
+- [Discussions](https://github.com/incredlabs/ormdb/discussions) - Questions and community support
 
 ---
 

@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/ormdb-studio/badge.svg)](https://docs.rs/ormdb-studio)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
 
-Web-based database management studio for [ORMDB](https://github.com/Skelf-Research/ormdb).
+Web-based database management studio for [ORMDB](https://github.com/incredlabs/ormdb).
 
 ## Overview
 
@@ -23,7 +23,7 @@ Web-based database management studio for [ORMDB](https://github.com/Skelf-Resear
 cargo install ormdb-studio
 
 # Or build from source
-git clone https://github.com/Skelf-Research/ormdb.git
+git clone https://github.com/incredlabs/ormdb.git
 cd ormdb
 cargo build --release -p ormdb-studio
 ```
@@ -164,4 +164,4 @@ cargo run -p ormdb-studio -- --port 3001
 
 MIT License - see [LICENSE](../../LICENSE) for details.
 
-Part of the [ORMDB](https://github.com/Skelf-Research/ormdb) project.
+Part of the [ORMDB](https://github.com/incredlabs/ormdb) project.

@@ -48,7 +48,7 @@ Feature requests are welcome! Please provide:
 
 ```bash
 # Clone the repository
-git clone https://github.com/Skelf-Research/ormdb.git
+git clone https://github.com/incredlabs/ormdb.git
 cd ormdb
 
 # Build all crates

@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/ormdb-server/badge.svg)](https://docs.rs/ormdb-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
 
-Standalone database server for [ORMDB](https://github.com/Skelf-Research/ormdb).
+Standalone database server for [ORMDB](https://github.com/incredlabs/ormdb).
 
 ## Overview
 
@@ -23,7 +23,7 @@ Standalone database server for [ORMDB](https://github.com/Skelf-Research/ormdb).
 cargo install ormdb-server
 
 # Or build from source
-git clone https://github.com/Skelf-Research/ormdb.git
+git clone https://github.com/incredlabs/ormdb.git
 cd ormdb
 cargo build --release -p ormdb-server
 ```
@@ -78,4 +78,4 @@ client = Client("ormdb://localhost:5432")
 
 MIT License - see [LICENSE](../../LICENSE) for details.
 
-Part of the [ORMDB](https://github.com/Skelf-Research/ormdb) project.
+Part of the [ORMDB](https://github.com/incredlabs/ormdb) project.

@@ -4,7 +4,7 @@
 # Downloads pre-compiled binaries from GitHub releases or builds from source
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Skelf-Research/ormdb/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/incredlabs/ormdb/main/scripts/install.sh | bash
 #   ./install.sh --version 0.1.0 --dir /usr/local/bin
 #   ./install.sh --from-source
 
@@ -14,7 +14,7 @@ set -o pipefail
 # ============================================
 # Configuration
 # ============================================
-REPO="Skelf-Research/ormdb"
+REPO="incredlabs/ormdb"
 INSTALL_DIR="${ORMDB_INSTALL_DIR:-$HOME/.ormdb/bin}"
 BINARIES=("ormdb-server" "ormdb" "ormdb-gateway" "ormdb-studio")
 
@@ -87,7 +87,7 @@ Examples:
     ./install.sh --from-source
 
     # One-liner installation
-    curl -fsSL https://raw.githubusercontent.com/Skelf-Research/ormdb/main/scripts/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/incredlabs/ormdb/main/scripts/install.sh | bash
 EOF
 }
 

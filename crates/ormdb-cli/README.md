@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/ormdb-cli/badge.svg)](https://docs.rs/ormdb-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
 
-Command-line interface for [ORMDB](https://github.com/Skelf-Research/ormdb).
+Command-line interface for [ORMDB](https://github.com/incredlabs/ormdb).
 
 ## Overview
 
@@ -23,7 +23,7 @@ Command-line interface for [ORMDB](https://github.com/Skelf-Research/ormdb).
 cargo install ormdb-cli
 
 # Or build from source
-git clone https://github.com/Skelf-Research/ormdb.git
+git clone https://github.com/incredlabs/ormdb.git
 cd ormdb
 cargo build --release -p ormdb-cli
 ```
@@ -94,4 +94,4 @@ max_entries = 1000
 
 MIT License - see [LICENSE](../../LICENSE) for details.
 
-Part of the [ORMDB](https://github.com/Skelf-Research/ormdb) project.
+Part of the [ORMDB](https://github.com/incredlabs/ormdb) project.

@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/ormdb-client/badge.svg)](https://docs.rs/ormdb-client)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
 
-Async Rust client library for [ORMDB](https://github.com/Skelf-Research/ormdb).
+Async Rust client library for [ORMDB](https://github.com/incredlabs/ormdb).
 
 ## Overview
 
@@ -88,4 +88,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 MIT License - see [LICENSE](../../LICENSE) for details.
 
-Part of the [ORMDB](https://github.com/Skelf-Research/ormdb) project.
+Part of the [ORMDB](https://github.com/incredlabs/ormdb) project.

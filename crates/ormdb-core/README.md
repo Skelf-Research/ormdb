@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/ormdb-core/badge.svg)](https://docs.rs/ormdb-core)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
 
-Core storage engine, query executor, and catalog for [ORMDB](https://github.com/Skelf-Research/ormdb).
+Core storage engine, query executor, and catalog for [ORMDB](https://github.com/incredlabs/ormdb).
 
 ## Overview
 
@@ -58,4 +58,4 @@ ormdb-core/
 
 MIT License - see [LICENSE](../../LICENSE) for details.
 
-Part of the [ORMDB](https://github.com/Skelf-Research/ormdb) project.
+Part of the [ORMDB](https://github.com/incredlabs/ormdb) project.

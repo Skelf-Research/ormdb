@@ -197,8 +197,8 @@ ORMDB follows [Semantic Versioning](https://semver.org/):
 
 Found a bug or have a feature request?
 
-- [GitHub Issues](https://github.com/Skelf-Research/ormdb/issues)
-- [Discussions](https://github.com/Skelf-Research/ormdb/discussions)
+- [GitHub Issues](https://github.com/incredlabs/ormdb/issues)
+- [Discussions](https://github.com/incredlabs/ormdb/discussions)
 
 When reporting bugs, please include:
 

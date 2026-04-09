@@ -57,4 +57,4 @@ If you encounter issues while following these guides:
 
 1. Check the [Troubleshooting](../operations/troubleshooting.md) section
 2. Review the [API Reference](../reference/index.md)
-3. Search the [GitHub Issues](https://github.com/Skelf-Research/ormdb/issues)
+3. Search the [GitHub Issues](https://github.com/incredlabs/ormdb/issues)

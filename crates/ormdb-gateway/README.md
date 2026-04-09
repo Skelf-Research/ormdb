@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/ormdb-gateway/badge.svg)](https://docs.rs/ormdb-gateway)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
 
-HTTP/REST gateway for [ORMDB](https://github.com/Skelf-Research/ormdb).
+HTTP/REST gateway for [ORMDB](https://github.com/incredlabs/ormdb).
 
 ## Overview
 
@@ -23,7 +23,7 @@ HTTP/REST gateway for [ORMDB](https://github.com/Skelf-Research/ormdb).
 cargo install ormdb-gateway
 
 # Or build from source
-git clone https://github.com/Skelf-Research/ormdb.git
+git clone https://github.com/incredlabs/ormdb.git
 cd ormdb
 cargo build --release -p ormdb-gateway
 ```
@@ -113,4 +113,4 @@ Content-Type: application/json
 
 MIT License - see [LICENSE](../../LICENSE) for details.
 
-Part of the [ORMDB](https://github.com/Skelf-Research/ormdb) project.
+Part of the [ORMDB](https://github.com/incredlabs/ormdb) project.

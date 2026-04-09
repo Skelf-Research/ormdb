@@ -1,7 +1,7 @@
 # ORMDB
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Build Status](https://github.com/Skelf-Research/ormdb/actions/workflows/ci.yml/badge.svg)](https://github.com/Skelf-Research/ormdb/actions)
+[![Build Status](https://github.com/incredlabs/ormdb/actions/workflows/ci.yml/badge.svg)](https://github.com/incredlabs/ormdb/actions)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Documentation](https://img.shields.io/badge/docs-online-green.svg)](https://docs.skelfresearch.com/ormdb)
 
@@ -53,7 +53,7 @@ const user = await db.fetch({
 cargo install ormdb-server
 
 # Or build from source
-git clone https://github.com/Skelf-Research/ormdb.git
+git clone https://github.com/incredlabs/ormdb.git
 cd ormdb
 cargo build --release
 ```
@@ -145,7 +145,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ```bash
 # Development setup
-git clone https://github.com/Skelf-Research/ormdb.git
+git clone https://github.com/incredlabs/ormdb.git
 cd ormdb
 cargo build
 cargo test
@@ -159,7 +159,7 @@ See [`docs/roadmap.md`](docs/roadmap.md) for implementation phases and milestone
 
 ## Community
 
-- [GitHub Issues](https://github.com/Skelf-Research/ormdb/issues) - Bug reports and feature requests
+- [GitHub Issues](https://github.com/incredlabs/ormdb/issues) - Bug reports and feature requests
 - [Documentation](https://docs.skelfresearch.com/ormdb) - Full documentation site
 
 ## License

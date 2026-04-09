@@ -339,7 +339,7 @@ async fn execute_query(query: GraphQuery) -> Result<QueryResult> {
 
 ## Contributing
 
-See the [Contributing Guide](https://github.com/Skelf-Research/ormdb/blob/main/CONTRIBUTING.md) for:
+See the [Contributing Guide](https://github.com/incredlabs/ormdb/blob/main/CONTRIBUTING.md) for:
 
 - Development setup
 - Code style guidelines

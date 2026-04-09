@@ -83,13 +83,13 @@ An analytics dashboard with live updates and aggregations.
 
 ## Running Examples
 
-All examples are available in the [ormdb-examples](https://github.com/Skelf-Research/ormdb-examples) repository.
+All examples are available in the [ormdb-examples](https://github.com/incredlabs/ormdb-examples) repository.
 
 ### Clone and Run
 
 ```bash
 # Clone examples repository
-git clone https://github.com/Skelf-Research/ormdb-examples.git
+git clone https://github.com/incredlabs/ormdb-examples.git
 cd ormdb-examples
 
 # Choose an example
@@ -147,5 +147,5 @@ We welcome community examples! To contribute:
 4. Include a comprehensive README
 5. Submit a pull request
 
-See the [contribution guide](https://github.com/Skelf-Research/ormdb-examples/blob/main/CONTRIBUTING.md) for details.
+See the [contribution guide](https://github.com/incredlabs/ormdb-examples/blob/main/CONTRIBUTING.md) for details.
 

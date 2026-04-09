@@ -43,7 +43,7 @@ dev = [
 [project.urls]
 Homepage = "https://docs.skelfresearch.com/ormdb"
 Documentation = "https://docs.skelfresearch.com/ormdb"
-Repository = "https://github.com/Skelf-Research/ormdb"
+Repository = "https://github.com/incredlabs/ormdb"
 
 [project.entry-points."sqlalchemy.dialects"]
 ormdb = "ormdb.sqlalchemy:OrmdbDialect"

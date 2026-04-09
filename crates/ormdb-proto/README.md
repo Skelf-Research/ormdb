@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/ormdb-proto/badge.svg)](https://docs.rs/ormdb-proto)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
 
-Wire protocol definitions for [ORMDB](https://github.com/Skelf-Research/ormdb) with zero-copy serialization.
+Wire protocol definitions for [ORMDB](https://github.com/incredlabs/ormdb) with zero-copy serialization.
 
 ## Overview
 
@@ -63,4 +63,4 @@ Response
 
 MIT License - see [LICENSE](../../LICENSE) for details.
 
-Part of the [ORMDB](https://github.com/Skelf-Research/ormdb) project.
+Part of the [ORMDB](https://github.com/incredlabs/ormdb) project.

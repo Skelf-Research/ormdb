@@ -1,6 +1,6 @@
 # ormdb-bench
 
-Benchmarking suite for [ORMDB](https://github.com/Skelf-Research/ormdb).
+Benchmarking suite for [ORMDB](https://github.com/incredlabs/ormdb).
 
 ## Overview
 
@@ -76,4 +76,4 @@ See [`docs/benchmarks.md`](../../docs/benchmarks.md) for detailed methodology an
 
 MIT License - see [LICENSE](../../LICENSE) for details.
 
-Part of the [ORMDB](https://github.com/Skelf-Research/ormdb) project.
+Part of the [ORMDB](https://github.com/incredlabs/ormdb) project.

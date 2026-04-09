@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/ormdb-lang/badge.svg)](https://docs.rs/ormdb-lang)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
 
-ORM-style query language parser and compiler for [ORMDB](https://github.com/Skelf-Research/ormdb).
+ORM-style query language parser and compiler for [ORMDB](https://github.com/incredlabs/ormdb).
 
 ## Overview
 
@@ -70,4 +70,4 @@ ormdb-lang/
 
 MIT License - see [LICENSE](../../LICENSE) for details.
 
-Part of the [ORMDB](https://github.com/Skelf-Research/ormdb) project.
+Part of the [ORMDB](https://github.com/incredlabs/ormdb) project.

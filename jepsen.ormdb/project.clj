@@ -1,6 +1,6 @@
 (defproject jepsen.ormdb "0.1.0-SNAPSHOT"
   :description "Jepsen tests for ORMDB - an ORM-first relational database"
-  :url "https://github.com/Skelf-Research/ormdb"
+  :url "https://github.com/incredlabs/ormdb"
   :license {:name "MIT"
             :url "https://opensource.org/licenses/MIT"}
 

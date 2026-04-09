@@ -13,7 +13,7 @@ An interactive terminal demo comparing ORMDB and SQLite side-by-side. See how OR
 ## Quick Start
 
 ```bash
-git clone https://github.com/Skelf-Research/ormdb.git
+git clone https://github.com/incredlabs/ormdb.git
 cd ormdb/documentation/demos
 cargo run --release
 ```
@@ -140,7 +140,7 @@ cargo run --release
 - [ORMDB Documentation](https://docs.skelfresearch.com/ormdb)
 - [ORMDB vs SQLite (Performance)](../docs/comparisons/vs-sqlite.md)
 - [Getting Started Guide](../docs/getting-started/quickstart.md)
-- [GitHub Repository](https://github.com/Skelf-Research/ormdb)
+- [GitHub Repository](https://github.com/incredlabs/ormdb)
 
 ---
 

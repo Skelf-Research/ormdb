@@ -33,7 +33,7 @@ If you have Rust installed, you can build from source:
 cargo install ormdb-server
 
 # Or build from source
-git clone https://github.com/Skelf-Research/ormdb.git
+git clone https://github.com/incredlabs/ormdb.git
 cd ormdb
 cargo build --release
 

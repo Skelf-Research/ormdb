@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/@ormdb/client.svg)](https://www.npmjs.com/package/@ormdb/client)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
 
-TypeScript client for [ORMDB](https://github.com/Skelf-Research/ormdb) with adapters for popular ORMs.
+TypeScript client for [ORMDB](https://github.com/incredlabs/ormdb) with adapters for popular ORMs.
 
 ## Installation
 
@@ -428,4 +428,4 @@ const users = await prisma.user.findMany({
 
 MIT License - see [LICENSE](../../LICENSE) for details.
 
-Part of the [ORMDB](https://github.com/Skelf-Research/ormdb) project.
+Part of the [ORMDB](https://github.com/incredlabs/ormdb) project.

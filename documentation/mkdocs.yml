@@ -1,8 +1,8 @@
 site_name: ORMDB Documentation
 site_description: The ORM-first relational database - typed queries, graph fetches, and safe migrations
 site_url: https://docs.skelfresearch.com/ormdb
-repo_url: https://github.com/Skelf-Research/ormdb
-repo_name: Skelf-Research/ormdb
+repo_url: https://github.com/incredlabs/ormdb
+repo_name: incredlabs/ormdb
 
 theme:
   name: material
@@ -138,5 +138,5 @@ nav:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/Skelf-Research/ormdb
+      link: https://github.com/incredlabs/ormdb
   generator: false
