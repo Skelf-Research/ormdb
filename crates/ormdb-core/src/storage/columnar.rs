@@ -455,6 +455,27 @@ impl<'a> ColumnarProjection<'a> {
                     buf.extend_from_slice(uuid);
                 }
             }
+            // Search-related types
+            Value::Vector(arr) => {
+                buf.push(ValueTag::Vector as u8);
+                buf.extend_from_slice(&(arr.len() as u32).to_le_bytes());
+                for n in arr {
+                    buf.extend_from_slice(&n.to_le_bytes());
+                }
+            }
+            Value::GeoPoint { lat, lon } => {
+                buf.push(ValueTag::GeoPoint as u8);
+                buf.extend_from_slice(&lat.to_le_bytes());
+                buf.extend_from_slice(&lon.to_le_bytes());
+            }
+            Value::GeoPolygon(vertices) => {
+                buf.push(ValueTag::GeoPolygon as u8);
+                buf.extend_from_slice(&(vertices.len() as u32).to_le_bytes());
+                for (lat, lon) in vertices {
+                    buf.extend_from_slice(&lat.to_le_bytes());
+                    buf.extend_from_slice(&lon.to_le_bytes());
+                }
+            }
         }
 
         Ok(buf)
@@ -681,6 +702,60 @@ impl<'a> ColumnarProjection<'a> {
                 }
                 Ok(Value::UuidArray(arr))
             }
+            // Search-related types
+            t if t == ValueTag::Vector as u8 => {
+                if data.len() < 4 {
+                    return Err(Error::InvalidData("missing vector length".to_string()));
+                }
+                let mut len_buf = [0u8; 4];
+                len_buf.copy_from_slice(&data[..4]);
+                let len = u32::from_le_bytes(len_buf) as usize;
+                let mut arr = Vec::with_capacity(len);
+                for i in 0..len {
+                    let offset = 4 + i * 4;
+                    if data.len() < offset + 4 {
+                        return Err(Error::InvalidData("truncated vector".to_string()));
+                    }
+                    let mut buf = [0u8; 4];
+                    buf.copy_from_slice(&data[offset..offset + 4]);
+                    arr.push(f32::from_le_bytes(buf));
+                }
+                Ok(Value::Vector(arr))
+            }
+            t if t == ValueTag::GeoPoint as u8 => {
+                if data.len() < 16 {
+                    return Err(Error::InvalidData("missing geo point data".to_string()));
+                }
+                let mut lat_buf = [0u8; 8];
+                let mut lon_buf = [0u8; 8];
+                lat_buf.copy_from_slice(&data[..8]);
+                lon_buf.copy_from_slice(&data[8..16]);
+                Ok(Value::GeoPoint {
+                    lat: f64::from_le_bytes(lat_buf),
+                    lon: f64::from_le_bytes(lon_buf),
+                })
+            }
+            t if t == ValueTag::GeoPolygon as u8 => {
+                if data.len() < 4 {
+                    return Err(Error::InvalidData("missing polygon vertex count".to_string()));
+                }
+                let mut len_buf = [0u8; 4];
+                len_buf.copy_from_slice(&data[..4]);
+                let len = u32::from_le_bytes(len_buf) as usize;
+                let mut vertices = Vec::with_capacity(len);
+                for i in 0..len {
+                    let offset = 4 + i * 16;
+                    if data.len() < offset + 16 {
+                        return Err(Error::InvalidData("truncated geo polygon".to_string()));
+                    }
+                    let mut lat_buf = [0u8; 8];
+                    let mut lon_buf = [0u8; 8];
+                    lat_buf.copy_from_slice(&data[offset..offset + 8]);
+                    lon_buf.copy_from_slice(&data[offset + 8..offset + 16]);
+                    vertices.push((f64::from_le_bytes(lat_buf), f64::from_le_bytes(lon_buf)));
+                }
+                Ok(Value::GeoPolygon(vertices))
+            }
             _ => Err(Error::InvalidData(format!("unknown value tag: {}", tag))),
         }
     }
@@ -706,6 +781,10 @@ enum ValueTag {
     Float64Array = 14,
     StringArray = 15,
     UuidArray = 16,
+    // Search-related types
+    Vector = 17,     // Vec<f32> for similarity search
+    GeoPoint = 18,   // (lat, lon) pair
+    GeoPolygon = 19, // Vec<(lat, lon)> vertices
 }
 
 /// Dictionary for string compression.

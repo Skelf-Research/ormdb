@@ -124,3 +124,185 @@ class StreamChangesResult:
             next_lsn=response.get("next_lsn", 0),
             has_more=response.get("has_more", False),
         )
+
+
+# ============================================================================
+# Search Filter Types
+# ============================================================================
+
+
+@dataclass
+class VectorSearchFilter:
+    """Vector similarity search filter using HNSW index."""
+
+    field: str
+    query_vector: list[float]
+    k: int
+    max_distance: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to protocol format."""
+        result: dict[str, Any] = {
+            "vector_nearest_neighbor": {
+                "field": self.field,
+                "query_vector": self.query_vector,
+                "k": self.k,
+            }
+        }
+        if self.max_distance is not None:
+            result["vector_nearest_neighbor"]["max_distance"] = self.max_distance
+        return result
+
+
+@dataclass
+class GeoRadiusFilter:
+    """Geographic radius search filter."""
+
+    field: str
+    center_lat: float
+    center_lon: float
+    radius_km: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to protocol format."""
+        return {
+            "geo_within_radius": {
+                "field": self.field,
+                "center_lat": self.center_lat,
+                "center_lon": self.center_lon,
+                "radius_km": self.radius_km,
+            }
+        }
+
+
+@dataclass
+class GeoBoxFilter:
+    """Geographic bounding box search filter."""
+
+    field: str
+    min_lat: float
+    min_lon: float
+    max_lat: float
+    max_lon: float
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to protocol format."""
+        return {
+            "geo_within_box": {
+                "field": self.field,
+                "min_lat": self.min_lat,
+                "min_lon": self.min_lon,
+                "max_lat": self.max_lat,
+                "max_lon": self.max_lon,
+            }
+        }
+
+
+@dataclass
+class GeoPolygonFilter:
+    """Geographic polygon containment search filter."""
+
+    field: str
+    vertices: list[tuple[float, float]]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to protocol format."""
+        return {
+            "geo_within_polygon": {
+                "field": self.field,
+                "vertices": self.vertices,
+            }
+        }
+
+
+@dataclass
+class GeoNearestFilter:
+    """Geographic k-nearest neighbor search filter."""
+
+    field: str
+    center_lat: float
+    center_lon: float
+    k: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to protocol format."""
+        return {
+            "geo_nearest_neighbor": {
+                "field": self.field,
+                "center_lat": self.center_lat,
+                "center_lon": self.center_lon,
+                "k": self.k,
+            }
+        }
+
+
+@dataclass
+class TextMatchFilter:
+    """Full-text BM25 search filter."""
+
+    field: str
+    query: str
+    min_score: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to protocol format."""
+        result: dict[str, Any] = {
+            "text_match": {
+                "field": self.field,
+                "query": self.query,
+            }
+        }
+        if self.min_score is not None:
+            result["text_match"]["min_score"] = self.min_score
+        return result
+
+
+@dataclass
+class TextPhraseFilter:
+    """Full-text phrase search filter."""
+
+    field: str
+    phrase: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to protocol format."""
+        return {
+            "text_phrase": {
+                "field": self.field,
+                "phrase": self.phrase,
+            }
+        }
+
+
+@dataclass
+class TextBooleanFilter:
+    """Full-text boolean search filter with must/should/must_not terms."""
+
+    field: str
+    must: list[str] = field(default_factory=list)
+    should: list[str] = field(default_factory=list)
+    must_not: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to protocol format."""
+        return {
+            "text_boolean": {
+                "field": self.field,
+                "must": self.must,
+                "should": self.should,
+                "must_not": self.must_not,
+            }
+        }
+
+
+# Union type for all search filters
+SearchFilter = (
+    VectorSearchFilter
+    | GeoRadiusFilter
+    | GeoBoxFilter
+    | GeoPolygonFilter
+    | GeoNearestFilter
+    | TextMatchFilter
+    | TextPhraseFilter
+    | TextBooleanFilter
+)

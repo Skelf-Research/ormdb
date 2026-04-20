@@ -1,0 +1,49 @@
+[package]
+name = "ormdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "ORMDB - An embedded graph database with multi-writer support"
+keywords = ["database", "embedded", "graph", "orm", "concurrent"]
+categories = ["database", "database-implementations"]
+
+[features]
+default = []
+
+# Async API (adds tokio dependency)
+async = ["tokio"]
+
+# Query language parser
+query-lang = ["dep:ormdb-lang"]
+
+# Full feature set
+full = ["async", "query-lang"]
+
+[dependencies]
+# Internal crates
+ormdb-core = { version = "0.1.0", path = "../ormdb-core" }
+ormdb-proto = { version = "0.1.0", path = "../ormdb-proto" }
+ormdb-lang = { version = "0.1.0", path = "../ormdb-lang", optional = true }
+
+# Error handling
+thiserror.workspace = true
+
+# Thread-safe primitives
+parking_lot.workspace = true
+
+# Async runtime (optional)
+tokio = { workspace = true, optional = true }
+
+# Tracing
+tracing.workspace = true
+
+# Storage (for types)
+sled.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

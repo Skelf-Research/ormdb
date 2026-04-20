@@ -6,14 +6,20 @@ In-depth guides for advanced ORMDB features and patterns.
 
 | Guide | Description |
 |-------|-------------|
+| [Embedded Mode](embedded-mode.md) | In-process database for Rust applications |
 | [Schema Migrations](schema-migrations.md) | Safe schema evolution and versioning |
 | [Security](security.md) | Row-level security, capabilities, field masking |
 | [Performance](performance.md) | Query optimization and indexing strategies |
 | [Pagination](pagination.md) | Efficient pagination patterns |
 | [Aggregations](aggregations.md) | COUNT, SUM, AVG, and grouped aggregations |
+| [Search](search.md) | Vector, geographic, and full-text search |
 | [Change Data Capture](cdc.md) | Real-time change streaming |
 
 ## Guide Categories
+
+### Deployment
+
+- **[Embedded Mode](embedded-mode.md)** - Run ORMDB in-process without a server (Rust only)
 
 ### Data Management
 
@@ -28,6 +34,10 @@ In-depth guides for advanced ORMDB features and patterns.
 
 - **[Performance](performance.md)** - Optimize queries and configure indexes
 - **[Aggregations](aggregations.md)** - Efficient data aggregation
+
+### Search
+
+- **[Search](search.md)** - Vector similarity, geographic queries, and full-text search
 
 ### Integration
 

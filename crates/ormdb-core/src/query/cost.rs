@@ -194,6 +194,30 @@ impl<'a> CostModel<'a> {
                     .sum::<f64>()
                     .min(1.0)
             }
+
+            // Search filters: typically very selective (return top-k or within region)
+            FilterExpr::VectorNearestNeighbor { k, .. } => {
+                // Returns exactly k results
+                (*k as f64 * 0.01).min(0.5)
+            }
+            FilterExpr::GeoWithinRadius { radius_km, .. } => {
+                // Smaller radius = more selective
+                if *radius_km < 1.0 { 0.01 }
+                else if *radius_km < 10.0 { 0.05 }
+                else if *radius_km < 100.0 { 0.1 }
+                else { 0.3 }
+            }
+            FilterExpr::GeoWithinBox { .. } => 0.1,
+            FilterExpr::GeoWithinPolygon { .. } => 0.1,
+            FilterExpr::GeoNearestNeighbor { k, .. } => {
+                (*k as f64 * 0.01).min(0.5)
+            }
+            FilterExpr::TextMatch { .. } => 0.1,
+            FilterExpr::TextPhrase { .. } => 0.05, // Phrase is more selective
+            FilterExpr::TextBoolean { must, .. } => {
+                // More must terms = more selective
+                (0.3_f64).powi(must.len() as i32).max(0.01)
+            }
         }
     }
 
@@ -214,6 +238,20 @@ impl<'a> CostModel<'a> {
             SimpleFilter::NotLike { pattern, .. } => {
                 if pattern.starts_with('%') { 0.5 } else { 0.9 }
             }
+            // Search filters
+            SimpleFilter::VectorNearestNeighbor { k, .. } => (*k as f64 * 0.01).min(0.5),
+            SimpleFilter::GeoWithinRadius { radius_km, .. } => {
+                if *radius_km < 1.0 { 0.01 }
+                else if *radius_km < 10.0 { 0.05 }
+                else if *radius_km < 100.0 { 0.1 }
+                else { 0.3 }
+            }
+            SimpleFilter::GeoWithinBox { .. } => 0.1,
+            SimpleFilter::GeoWithinPolygon { .. } => 0.1,
+            SimpleFilter::GeoNearestNeighbor { k, .. } => (*k as f64 * 0.01).min(0.5),
+            SimpleFilter::TextMatch { .. } => 0.1,
+            SimpleFilter::TextPhrase { .. } => 0.05,
+            SimpleFilter::TextBoolean { must, .. } => (0.3_f64).powi(must.len() as i32).max(0.01),
         }
     }
 

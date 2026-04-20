@@ -13,16 +13,56 @@ brew install ormdb       # macOS
 apt install ormdb        # Debian/Ubuntu
 ```
 
+## Connection Modes
+
+The CLI supports both embedded and client modes, auto-detected based on the target:
+
+| Target | Mode | Description |
+|--------|------|-------------|
+| `:memory:` | Embedded | In-memory database (default) |
+| `./path` or `/path` | Embedded | File-based database |
+| `tcp://host:port` | Client | TCP connection to server |
+| `ipc:///path/socket` | Client | IPC/Unix socket connection |
+
+**Examples:**
+
+```bash
+# Embedded mode - in-memory (default)
+ormdb
+
+# Embedded mode - file-based
+ormdb ./my_data
+ormdb /var/lib/ormdb/data
+
+# Client mode - TCP
+ormdb tcp://localhost:9000
+
+# Client mode - IPC
+ormdb ipc:///tmp/ormdb.sock
+```
+
 ## Global Options
 
 | Option | Short | Description |
 |--------|-------|-------------|
 | `--config` | `-c` | Configuration file path |
-| `--host` | `-h` | Server host |
-| `--port` | `-p` | Server port |
+| `--timeout` | | Connection timeout in seconds (client mode) |
 | `--verbose` | `-v` | Verbose output |
 | `--quiet` | `-q` | Suppress non-error output |
 | `--format` | `-f` | Output format (table, json, csv) |
+
+## Execution Modes
+
+```bash
+# Interactive REPL (default)
+ormdb ./data
+
+# Single command
+ormdb ./data -c "User.findMany()"
+
+# Script file
+ormdb ./data -f queries.sql
+```
 
 ---
 
@@ -535,22 +575,54 @@ ormdb config show [OPTIONS]
 
 ### ormdb shell
 
-Start interactive shell.
+Start interactive shell (REPL).
 
 ```bash
-ormdb shell [OPTIONS]
+# Embedded mode
+ormdb ./data
+
+# Client mode
+ormdb tcp://localhost:9000
 ```
 
-**Shell Commands:**
+**Common Shell Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `.help` | Show help |
+| `.status` | Show connection/database status |
+| `.schema [entity]` | List entities or describe specific entity |
+| `.explain <query>` | Show query execution plan |
+| `.format [type]` | Set output format (table/json/csv) |
+| `.history` | Show query history |
+| `.exit` / `.quit` | Exit shell |
+
+**Embedded Mode Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `.flush` | Flush pending writes to disk |
+| `.compact` | Run compaction to reclaim space |
+| `.backup <s3://...>` | Create backup to S3 |
+| `.backup <s3://...> --incremental` | Create incremental backup |
+| `.restore <s3://...>` | Restore from S3 backup |
+| `.restore <s3://...> --lsn <N>` | Point-in-time recovery to specific LSN |
+| `.backup-status` | Show backup history and status |
+
+**Client Mode Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `.connect <address>` | Connect to an ORMDB server |
+| `.disconnect` | Disconnect from current server |
+| `.metrics` | Show server performance metrics |
+
+**Query Examples:**
 
 ```
-ormdb> .help              # Show help
-ormdb> .tables            # List entities
-ormdb> .schema User       # Show entity schema
-ormdb> .exit              # Exit shell
-
-ormdb> SELECT * FROM User WHERE status = 'active' LIMIT 10;
-ormdb> INSERT INTO User (name, email) VALUES ('Alice', 'alice@example.com');
+ormdb> User.findMany()
+ormdb> User.findMany({ where: { status: "active" }, take: 10 })
+ormdb> User.create({ data: { name: "Alice", email: "alice@example.com" } })
 ```
 
 ---

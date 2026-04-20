@@ -542,6 +542,96 @@ ORMDB_URL="ormdb://localhost:8080"
 
 ---
 
+## Search Features
+
+ORMDB supports advanced search operations through Prisma's where clause.
+
+### Vector Search
+
+```typescript
+// Find similar products by embedding
+const similar = await prisma.product.findMany({
+  where: {
+    embedding: {
+      vectorSearch: {
+        queryVector: [0.1, 0.2, 0.3, ...],
+        k: 10,
+        maxDistance: 0.5,
+      },
+    },
+  },
+});
+```
+
+### Geographic Search
+
+```typescript
+// Find restaurants within 5km
+const nearby = await prisma.restaurant.findMany({
+  where: {
+    location: {
+      geoRadius: {
+        lat: 37.7749,
+        lon: -122.4194,
+        radiusKm: 5,
+      },
+    },
+  },
+});
+
+// Bounding box search
+const inBox = await prisma.restaurant.findMany({
+  where: {
+    location: {
+      geoBox: {
+        minLat: 37.7, minLon: -122.5,
+        maxLat: 37.85, maxLon: -122.35,
+      },
+    },
+  },
+});
+```
+
+### Full-Text Search
+
+```typescript
+// BM25 text search
+const articles = await prisma.article.findMany({
+  where: {
+    content: {
+      textMatch: {
+        query: "rust programming",
+        minScore: 0.5,
+      },
+    },
+  },
+});
+
+// Phrase search
+const exact = await prisma.article.findMany({
+  where: {
+    content: {
+      textPhrase: "quick brown fox",
+    },
+  },
+});
+
+// Boolean search
+const advanced = await prisma.article.findMany({
+  where: {
+    content: {
+      textBoolean: {
+        must: ["rust"],
+        should: ["performance", "safety"],
+        mustNot: ["deprecated"],
+      },
+    },
+  },
+});
+```
+
+---
+
 ## Limitations
 
 Features not supported with ORMDB:
@@ -552,7 +642,6 @@ Features not supported with ORMDB:
 | `$queryRaw` | Not supported | Use native client |
 | `$executeRaw` | Not supported | Use native client |
 | Json filtering | Partial | Basic support only |
-| Full-text search | Not supported | Use external search |
 
 ---
 

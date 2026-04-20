@@ -32,6 +32,10 @@ enum ValueTag {
     Float64Array = 14,
     StringArray = 15,
     UuidArray = 16,
+    // Search-related types
+    Vector = 17,
+    GeoPoint = 18,
+    GeoPolygon = 19,
 }
 
 impl TryFrom<u8> for ValueTag {
@@ -56,6 +60,9 @@ impl TryFrom<u8> for ValueTag {
             14 => Ok(ValueTag::Float64Array),
             15 => Ok(ValueTag::StringArray),
             16 => Ok(ValueTag::UuidArray),
+            17 => Ok(ValueTag::Vector),
+            18 => Ok(ValueTag::GeoPoint),
+            19 => Ok(ValueTag::GeoPolygon),
             _ => Err(Error::InvalidData(format!("Unknown value tag: {}", value))),
         }
     }
@@ -368,6 +375,22 @@ pub fn skip_value(data: &[u8]) -> Result<usize, Error> {
             }
             cursor
         }
+        // Search-related types
+        ValueTag::Vector => {
+            if data.len() < 5 {
+                return Err(Error::InvalidData("Data too short for vector length".into()));
+            }
+            let len = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+            5 + len * 4 // tag + 4 byte length + len * 4 bytes (f32)
+        }
+        ValueTag::GeoPoint => 17, // tag + 8 bytes lat + 8 bytes lon
+        ValueTag::GeoPolygon => {
+            if data.len() < 5 {
+                return Err(Error::InvalidData("Data too short for geo polygon length".into()));
+            }
+            let len = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
+            5 + len * 16 // tag + 4 byte length + len * 16 bytes (8 lat + 8 lon)
+        }
     };
 
     Ok(size)
@@ -476,6 +499,27 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) -> Result<(), Error> {
             buf.extend_from_slice(&(arr.len() as u32).to_le_bytes());
             for uuid in arr {
                 buf.extend_from_slice(uuid);
+            }
+        }
+        // Search-related types
+        Value::Vector(arr) => {
+            buf.push(ValueTag::Vector as u8);
+            buf.extend_from_slice(&(arr.len() as u32).to_le_bytes());
+            for f in arr {
+                buf.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        Value::GeoPoint { lat, lon } => {
+            buf.push(ValueTag::GeoPoint as u8);
+            buf.extend_from_slice(&lat.to_le_bytes());
+            buf.extend_from_slice(&lon.to_le_bytes());
+        }
+        Value::GeoPolygon(vertices) => {
+            buf.push(ValueTag::GeoPolygon as u8);
+            buf.extend_from_slice(&(vertices.len() as u32).to_le_bytes());
+            for (lat, lon) in vertices {
+                buf.extend_from_slice(&lat.to_le_bytes());
+                buf.extend_from_slice(&lon.to_le_bytes());
             }
         }
     }
@@ -695,6 +739,52 @@ fn decode_value(data: &[u8]) -> Result<(Value, usize), Error> {
                 arr.push(uuid);
             }
             Value::UuidArray(arr)
+        }
+        // Search-related types
+        ValueTag::Vector => {
+            if cursor + 4 > data.len() {
+                return Err(Error::InvalidData("Data too short for vector length".into()));
+            }
+            let len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            if cursor + len * 4 > data.len() {
+                return Err(Error::InvalidData("Data too short for vector".into()));
+            }
+            let mut arr = Vec::with_capacity(len);
+            for _ in 0..len {
+                arr.push(f32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()));
+                cursor += 4;
+            }
+            Value::Vector(arr)
+        }
+        ValueTag::GeoPoint => {
+            if cursor + 16 > data.len() {
+                return Err(Error::InvalidData("Data too short for geo point".into()));
+            }
+            let lat = f64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+            let lon = f64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+            Value::GeoPoint { lat, lon }
+        }
+        ValueTag::GeoPolygon => {
+            if cursor + 4 > data.len() {
+                return Err(Error::InvalidData("Data too short for geo polygon length".into()));
+            }
+            let len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            if cursor + len * 16 > data.len() {
+                return Err(Error::InvalidData("Data too short for geo polygon".into()));
+            }
+            let mut vertices = Vec::with_capacity(len);
+            for _ in 0..len {
+                let lat = f64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
+                cursor += 8;
+                let lon = f64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
+                cursor += 8;
+                vertices.push((lat, lon));
+            }
+            Value::GeoPolygon(vertices)
         }
     };
 

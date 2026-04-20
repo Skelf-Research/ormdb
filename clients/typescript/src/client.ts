@@ -19,6 +19,11 @@ import type {
   Value,
   FieldValue,
   EntityRow,
+  SearchFilter,
+  VectorSearchOptions,
+  TextSearchOptions,
+  SearchOptions,
+  RelationInclude,
 } from "./types";
 import { OrmdbError } from "./types";
 
@@ -395,6 +400,257 @@ export class OrmdbClient {
       "GET",
       `/replication/changes?${params.toString()}`
     );
+  }
+
+  // ==========================================================================
+  // Search Methods
+  // ==========================================================================
+
+  /**
+   * Perform vector similarity search using HNSW index.
+   *
+   * @example
+   * ```typescript
+   * const results = await client.vectorSearch("Product", "embedding", [0.1, 0.2, ...], 10);
+   * ```
+   */
+  async vectorSearch<T extends EntityRow = EntityRow>(
+    entity: string,
+    field: string,
+    queryVector: number[],
+    k: number,
+    options: VectorSearchOptions = {}
+  ): Promise<QueryResult<T>> {
+    const filter: SearchFilter = {
+      vector_nearest_neighbor: {
+        field,
+        query_vector: queryVector,
+        k,
+        max_distance: options.maxDistance,
+      },
+    };
+    return this.query<T>(entity, {
+      fields: options.fields,
+      filter: filter as unknown as FilterExpr,
+      includes: options.includes,
+      limit: options.limit,
+    });
+  }
+
+  /**
+   * Search for entities within a geographic radius.
+   *
+   * @example
+   * ```typescript
+   * const results = await client.geoSearch("Restaurant", "location", 37.7749, -122.4194, 5.0);
+   * ```
+   */
+  async geoSearch<T extends EntityRow = EntityRow>(
+    entity: string,
+    field: string,
+    centerLat: number,
+    centerLon: number,
+    radiusKm: number,
+    options: SearchOptions = {}
+  ): Promise<QueryResult<T>> {
+    const filter: SearchFilter = {
+      geo_within_radius: {
+        field,
+        center_lat: centerLat,
+        center_lon: centerLon,
+        radius_km: radiusKm,
+      },
+    };
+    return this.query<T>(entity, {
+      fields: options.fields,
+      filter: filter as unknown as FilterExpr,
+      includes: options.includes,
+      limit: options.limit,
+    });
+  }
+
+  /**
+   * Search for entities within a geographic bounding box.
+   */
+  async geoBoxSearch<T extends EntityRow = EntityRow>(
+    entity: string,
+    field: string,
+    minLat: number,
+    minLon: number,
+    maxLat: number,
+    maxLon: number,
+    options: SearchOptions = {}
+  ): Promise<QueryResult<T>> {
+    const filter: SearchFilter = {
+      geo_within_box: {
+        field,
+        min_lat: minLat,
+        min_lon: minLon,
+        max_lat: maxLat,
+        max_lon: maxLon,
+      },
+    };
+    return this.query<T>(entity, {
+      fields: options.fields,
+      filter: filter as unknown as FilterExpr,
+      includes: options.includes,
+      limit: options.limit,
+    });
+  }
+
+  /**
+   * Search for entities within a geographic polygon.
+   */
+  async geoPolygonSearch<T extends EntityRow = EntityRow>(
+    entity: string,
+    field: string,
+    vertices: [number, number][],
+    options: SearchOptions = {}
+  ): Promise<QueryResult<T>> {
+    const filter: SearchFilter = {
+      geo_within_polygon: {
+        field,
+        vertices,
+      },
+    };
+    return this.query<T>(entity, {
+      fields: options.fields,
+      filter: filter as unknown as FilterExpr,
+      includes: options.includes,
+      limit: options.limit,
+    });
+  }
+
+  /**
+   * Find k-nearest entities by geographic distance.
+   */
+  async geoNearest<T extends EntityRow = EntityRow>(
+    entity: string,
+    field: string,
+    centerLat: number,
+    centerLon: number,
+    k: number,
+    options: Omit<SearchOptions, "limit"> = {}
+  ): Promise<QueryResult<T>> {
+    const filter: SearchFilter = {
+      geo_nearest_neighbor: {
+        field,
+        center_lat: centerLat,
+        center_lon: centerLon,
+        k,
+      },
+    };
+    return this.query<T>(entity, {
+      fields: options.fields,
+      filter: filter as unknown as FilterExpr,
+      includes: options.includes,
+    });
+  }
+
+  /**
+   * Perform full-text search with BM25 scoring.
+   *
+   * @example
+   * ```typescript
+   * const results = await client.textSearch("Article", "content", "rust programming");
+   * ```
+   */
+  async textSearch<T extends EntityRow = EntityRow>(
+    entity: string,
+    field: string,
+    query: string,
+    options: TextSearchOptions = {}
+  ): Promise<QueryResult<T>> {
+    const filter: SearchFilter = {
+      text_match: {
+        field,
+        query,
+        min_score: options.minScore,
+      },
+    };
+    return this.query<T>(entity, {
+      fields: options.fields,
+      filter: filter as unknown as FilterExpr,
+      includes: options.includes,
+      limit: options.limit,
+    });
+  }
+
+  /**
+   * Perform exact phrase search.
+   */
+  async textPhraseSearch<T extends EntityRow = EntityRow>(
+    entity: string,
+    field: string,
+    phrase: string,
+    options: SearchOptions = {}
+  ): Promise<QueryResult<T>> {
+    const filter: SearchFilter = {
+      text_phrase: {
+        field,
+        phrase,
+      },
+    };
+    return this.query<T>(entity, {
+      fields: options.fields,
+      filter: filter as unknown as FilterExpr,
+      includes: options.includes,
+      limit: options.limit,
+    });
+  }
+
+  /**
+   * Perform boolean text search with must/should/must_not terms.
+   *
+   * @example
+   * ```typescript
+   * const results = await client.textBooleanSearch("Article", "content", {
+   *   must: ["rust"],
+   *   should: ["performance", "safety"],
+   *   mustNot: ["deprecated"],
+   * });
+   * ```
+   */
+  async textBooleanSearch<T extends EntityRow = EntityRow>(
+    entity: string,
+    field: string,
+    terms: {
+      must?: string[];
+      should?: string[];
+      mustNot?: string[];
+    },
+    options: SearchOptions = {}
+  ): Promise<QueryResult<T>> {
+    const filter: SearchFilter = {
+      text_boolean: {
+        field,
+        must: terms.must ?? [],
+        should: terms.should ?? [],
+        must_not: terms.mustNot ?? [],
+      },
+    };
+    return this.query<T>(entity, {
+      fields: options.fields,
+      filter: filter as unknown as FilterExpr,
+      includes: options.includes,
+      limit: options.limit,
+    });
+  }
+
+  /**
+   * Execute a search using a SearchFilter object.
+   */
+  async search<T extends EntityRow = EntityRow>(
+    entity: string,
+    filter: SearchFilter,
+    options: SearchOptions = {}
+  ): Promise<QueryResult<T>> {
+    return this.query<T>(entity, {
+      fields: options.fields,
+      filter: filter as unknown as FilterExpr,
+      includes: options.includes,
+      limit: options.limit,
+    });
   }
 
   /**

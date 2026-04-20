@@ -102,6 +102,164 @@ pub enum FilterExpr {
 
 ---
 
+## Search Filters
+
+Beyond standard comparison operators, ORMDB supports specialized search filters.
+
+### VectorNearestNeighbor
+
+HNSW k-nearest neighbor search for vector fields.
+
+```rust
+pub struct VectorNearestNeighbor {
+    pub field: String,
+    pub query_vector: Vec<f32>,
+    pub k: usize,
+    pub max_distance: Option<f32>,
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `field` | string | Vector field to search |
+| `query_vector` | float[] | Query embedding vector |
+| `k` | int | Number of nearest neighbors to return |
+| `max_distance` | float? | Optional maximum distance threshold |
+
+### GeoWithinRadius
+
+Geographic radius search for GeoPoint fields.
+
+```rust
+pub struct GeoWithinRadius {
+    pub field: String,
+    pub center_lat: f64,
+    pub center_lon: f64,
+    pub radius_km: f64,
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `field` | string | GeoPoint field to search |
+| `center_lat` | float | Center latitude (-90 to 90) |
+| `center_lon` | float | Center longitude (-180 to 180) |
+| `radius_km` | float | Search radius in kilometers |
+
+### GeoWithinBox
+
+Geographic bounding box search.
+
+```rust
+pub struct GeoWithinBox {
+    pub field: String,
+    pub min_lat: f64,
+    pub min_lon: f64,
+    pub max_lat: f64,
+    pub max_lon: f64,
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `field` | string | GeoPoint field to search |
+| `min_lat` | float | Minimum latitude |
+| `min_lon` | float | Minimum longitude |
+| `max_lat` | float | Maximum latitude |
+| `max_lon` | float | Maximum longitude |
+
+### GeoWithinPolygon
+
+Geographic polygon containment search.
+
+```rust
+pub struct GeoWithinPolygon {
+    pub field: String,
+    pub vertices: Vec<(f64, f64)>,
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `field` | string | GeoPoint field to search |
+| `vertices` | (float, float)[] | Polygon vertices as (lat, lon) pairs |
+
+### GeoNearestNeighbor
+
+Geographic k-nearest neighbor search.
+
+```rust
+pub struct GeoNearestNeighbor {
+    pub field: String,
+    pub center_lat: f64,
+    pub center_lon: f64,
+    pub k: usize,
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `field` | string | GeoPoint field to search |
+| `center_lat` | float | Center latitude |
+| `center_lon` | float | Center longitude |
+| `k` | int | Number of nearest neighbors to return |
+
+### TextMatch
+
+Full-text search with BM25 scoring.
+
+```rust
+pub struct TextMatch {
+    pub field: String,
+    pub query: String,
+    pub min_score: Option<f32>,
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `field` | string | Text field to search |
+| `query` | string | Search query (tokenized and stemmed) |
+| `min_score` | float? | Minimum relevance score (0.0 to 1.0) |
+
+### TextPhrase
+
+Full-text exact phrase search.
+
+```rust
+pub struct TextPhrase {
+    pub field: String,
+    pub phrase: String,
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `field` | string | Text field to search |
+| `phrase` | string | Exact phrase to match |
+
+### TextBoolean
+
+Full-text boolean search with must/should/must_not terms.
+
+```rust
+pub struct TextBoolean {
+    pub field: String,
+    pub must: Vec<String>,
+    pub should: Vec<String>,
+    pub must_not: Vec<String>,
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `field` | string | Text field to search |
+| `must` | string[] | Terms that must appear |
+| `should` | string[] | Terms that should appear (boost relevance) |
+| `must_not` | string[] | Terms that must not appear |
+
+---
+
 ## OrderSpec
 
 Ordering specification.

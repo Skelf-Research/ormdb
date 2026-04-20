@@ -17,6 +17,7 @@
 pub mod backends;
 pub mod fixtures;
 pub mod harness;
+pub mod oltp;
 
 pub use backends::{OrmdbBackend, SqliteBackend};
 #[cfg(feature = "postgres")]

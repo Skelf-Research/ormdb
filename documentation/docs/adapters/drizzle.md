@@ -438,6 +438,86 @@ await db.insert(users).values(newUser);
 
 ---
 
+## Search Operators
+
+ORMDB provides specialized search operators for vector, geographic, and full-text search.
+
+### Vector Search
+
+```typescript
+import { vectorSearch } from '@ormdb/drizzle-adapter';
+
+// Find similar products by embedding
+const similar = await db
+  .select()
+  .from(products)
+  .where(vectorSearch(products.embedding, queryVector, 10, 0.5));
+```
+
+### Geographic Search
+
+```typescript
+import { geoWithinRadius, geoWithinBox, geoWithinPolygon, geoNearest } from '@ormdb/drizzle-adapter';
+
+// Radius search
+const nearby = await db
+  .select()
+  .from(restaurants)
+  .where(geoWithinRadius(restaurants.location, 37.7749, -122.4194, 5.0));
+
+// Bounding box search
+const inBox = await db
+  .select()
+  .from(restaurants)
+  .where(geoWithinBox(restaurants.location, 37.7, -122.5, 37.85, -122.35));
+
+// Polygon search
+const inArea = await db
+  .select()
+  .from(restaurants)
+  .where(geoWithinPolygon(restaurants.location, [
+    [37.7, -122.5],
+    [37.8, -122.5],
+    [37.85, -122.4],
+  ]));
+
+// k-nearest
+const closest = await db
+  .select()
+  .from(restaurants)
+  .where(geoNearest(restaurants.location, 37.7749, -122.4194, 10));
+```
+
+### Full-Text Search
+
+```typescript
+import { textMatch, textPhrase, textBoolean } from '@ormdb/drizzle-adapter';
+
+// BM25 text search
+const articles = await db
+  .select()
+  .from(articles)
+  .where(textMatch(articles.content, "rust programming", 0.5));
+
+// Phrase search
+const exact = await db
+  .select()
+  .from(articles)
+  .where(textPhrase(articles.content, "quick brown fox"));
+
+// Boolean search
+const advanced = await db
+  .select()
+  .from(articles)
+  .where(textBoolean(articles.content, {
+    must: ["rust"],
+    should: ["performance", "safety"],
+    mustNot: ["deprecated"],
+  }));
+```
+
+---
+
 ## ORMDB-Specific Features
 
 ### Access Native Client

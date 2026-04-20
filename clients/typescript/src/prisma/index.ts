@@ -55,6 +55,41 @@ export interface WhereOperator<T> {
   startsWith?: string;
   endsWith?: string;
   mode?: "default" | "insensitive";
+  // Search operators
+  vectorSearch?: {
+    queryVector: number[];
+    k: number;
+    maxDistance?: number;
+  };
+  geoRadius?: {
+    lat: number;
+    lon: number;
+    radiusKm: number;
+  };
+  geoBox?: {
+    minLat: number;
+    minLon: number;
+    maxLat: number;
+    maxLon: number;
+  };
+  geoPolygon?: {
+    vertices: [number, number][];
+  };
+  geoNearest?: {
+    lat: number;
+    lon: number;
+    k: number;
+  };
+  textMatch?: {
+    query: string;
+    minScore?: number;
+  };
+  textPhrase?: string;
+  textBoolean?: {
+    must?: string[];
+    should?: string[];
+    mustNot?: string[];
+  };
 }
 
 /** Prisma order by clause */
@@ -613,6 +648,83 @@ export class PrismaClient {
             op: ops.mode === "insensitive" ? "ilike" : "like",
             value: pattern,
           });
+        }
+        // Search operators
+        if ("vectorSearch" in ops && ops.vectorSearch) {
+          conditions.push({
+            vector_nearest_neighbor: {
+              field: key,
+              query_vector: ops.vectorSearch.queryVector,
+              k: ops.vectorSearch.k,
+              max_distance: ops.vectorSearch.maxDistance,
+            },
+          } as unknown as FilterExpr);
+        }
+        if ("geoRadius" in ops && ops.geoRadius) {
+          conditions.push({
+            geo_within_radius: {
+              field: key,
+              center_lat: ops.geoRadius.lat,
+              center_lon: ops.geoRadius.lon,
+              radius_km: ops.geoRadius.radiusKm,
+            },
+          } as unknown as FilterExpr);
+        }
+        if ("geoBox" in ops && ops.geoBox) {
+          conditions.push({
+            geo_within_box: {
+              field: key,
+              min_lat: ops.geoBox.minLat,
+              min_lon: ops.geoBox.minLon,
+              max_lat: ops.geoBox.maxLat,
+              max_lon: ops.geoBox.maxLon,
+            },
+          } as unknown as FilterExpr);
+        }
+        if ("geoPolygon" in ops && ops.geoPolygon) {
+          conditions.push({
+            geo_within_polygon: {
+              field: key,
+              vertices: ops.geoPolygon.vertices,
+            },
+          } as unknown as FilterExpr);
+        }
+        if ("geoNearest" in ops && ops.geoNearest) {
+          conditions.push({
+            geo_nearest_neighbor: {
+              field: key,
+              center_lat: ops.geoNearest.lat,
+              center_lon: ops.geoNearest.lon,
+              k: ops.geoNearest.k,
+            },
+          } as unknown as FilterExpr);
+        }
+        if ("textMatch" in ops && ops.textMatch) {
+          conditions.push({
+            text_match: {
+              field: key,
+              query: ops.textMatch.query,
+              min_score: ops.textMatch.minScore,
+            },
+          } as unknown as FilterExpr);
+        }
+        if ("textPhrase" in ops && ops.textPhrase) {
+          conditions.push({
+            text_phrase: {
+              field: key,
+              phrase: ops.textPhrase,
+            },
+          } as unknown as FilterExpr);
+        }
+        if ("textBoolean" in ops && ops.textBoolean) {
+          conditions.push({
+            text_boolean: {
+              field: key,
+              must: ops.textBoolean.must ?? [],
+              should: ops.textBoolean.should ?? [],
+              must_not: ops.textBoolean.mustNot ?? [],
+            },
+          } as unknown as FilterExpr);
         }
         continue;
       }

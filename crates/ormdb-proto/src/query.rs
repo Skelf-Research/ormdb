@@ -293,6 +293,92 @@ pub enum FilterExpr {
     And(Vec<SimpleFilter>),
     /// At least one condition must be true (flat list, single level).
     Or(Vec<SimpleFilter>),
+
+    // === Vector Search ===
+    /// Find k nearest neighbors by vector similarity.
+    VectorNearestNeighbor {
+        /// Field containing the vector.
+        field: String,
+        /// Query vector to search for.
+        query_vector: Vec<f32>,
+        /// Number of nearest neighbors to return.
+        k: u32,
+        /// Optional maximum distance threshold.
+        max_distance: Option<f32>,
+    },
+
+    // === Geo Search ===
+    /// Find points within a radius of a center point.
+    GeoWithinRadius {
+        /// Field containing the geo point.
+        field: String,
+        /// Center latitude in degrees (-90 to 90).
+        center_lat: f64,
+        /// Center longitude in degrees (-180 to 180).
+        center_lon: f64,
+        /// Radius in kilometers.
+        radius_km: f64,
+    },
+    /// Find points within a bounding box.
+    GeoWithinBox {
+        /// Field containing the geo point.
+        field: String,
+        /// Minimum latitude.
+        min_lat: f64,
+        /// Minimum longitude.
+        min_lon: f64,
+        /// Maximum latitude.
+        max_lat: f64,
+        /// Maximum longitude.
+        max_lon: f64,
+    },
+    /// Find points within a polygon.
+    GeoWithinPolygon {
+        /// Field containing the geo point.
+        field: String,
+        /// Polygon vertices as (lat, lon) pairs.
+        vertices: Vec<(f64, f64)>,
+    },
+    /// Find k nearest points to a location.
+    GeoNearestNeighbor {
+        /// Field containing the geo point.
+        field: String,
+        /// Center latitude.
+        center_lat: f64,
+        /// Center longitude.
+        center_lon: f64,
+        /// Number of nearest neighbors.
+        k: u32,
+    },
+
+    // === Full Text Search ===
+    /// Match documents containing query terms (BM25 scored).
+    TextMatch {
+        /// Field containing the text.
+        field: String,
+        /// Search query (will be tokenized).
+        query: String,
+        /// Optional minimum relevance score (0.0 to 1.0).
+        min_score: Option<f32>,
+    },
+    /// Match documents containing an exact phrase.
+    TextPhrase {
+        /// Field containing the text.
+        field: String,
+        /// Exact phrase to search for.
+        phrase: String,
+    },
+    /// Boolean text search with must/should/must_not.
+    TextBoolean {
+        /// Field containing the text.
+        field: String,
+        /// Terms that must appear.
+        must: Vec<String>,
+        /// Terms that should appear (boost score).
+        should: Vec<String>,
+        /// Terms that must not appear.
+        must_not: Vec<String>,
+    },
 }
 
 /// A simple (non-compound) filter for use in And/Or expressions.
@@ -324,6 +410,92 @@ pub enum SimpleFilter {
     Like { field: String, pattern: String },
     /// Field does not match a LIKE pattern.
     NotLike { field: String, pattern: String },
+
+    // === Vector Search ===
+    /// Find k nearest neighbors by vector similarity.
+    VectorNearestNeighbor {
+        /// Field containing the vector.
+        field: String,
+        /// Query vector to search for.
+        query_vector: Vec<f32>,
+        /// Number of nearest neighbors to return.
+        k: u32,
+        /// Optional maximum distance threshold.
+        max_distance: Option<f32>,
+    },
+
+    // === Geo Search ===
+    /// Find points within a radius of a center point.
+    GeoWithinRadius {
+        /// Field containing the geo point.
+        field: String,
+        /// Center latitude in degrees (-90 to 90).
+        center_lat: f64,
+        /// Center longitude in degrees (-180 to 180).
+        center_lon: f64,
+        /// Radius in kilometers.
+        radius_km: f64,
+    },
+    /// Find points within a bounding box.
+    GeoWithinBox {
+        /// Field containing the geo point.
+        field: String,
+        /// Minimum latitude.
+        min_lat: f64,
+        /// Minimum longitude.
+        min_lon: f64,
+        /// Maximum latitude.
+        max_lat: f64,
+        /// Maximum longitude.
+        max_lon: f64,
+    },
+    /// Find points within a polygon.
+    GeoWithinPolygon {
+        /// Field containing the geo point.
+        field: String,
+        /// Polygon vertices as (lat, lon) pairs.
+        vertices: Vec<(f64, f64)>,
+    },
+    /// Find k nearest points to a location.
+    GeoNearestNeighbor {
+        /// Field containing the geo point.
+        field: String,
+        /// Center latitude.
+        center_lat: f64,
+        /// Center longitude.
+        center_lon: f64,
+        /// Number of nearest neighbors.
+        k: u32,
+    },
+
+    // === Full Text Search ===
+    /// Match documents containing query terms (BM25 scored).
+    TextMatch {
+        /// Field containing the text.
+        field: String,
+        /// Search query (will be tokenized).
+        query: String,
+        /// Optional minimum relevance score (0.0 to 1.0).
+        min_score: Option<f32>,
+    },
+    /// Match documents containing an exact phrase.
+    TextPhrase {
+        /// Field containing the text.
+        field: String,
+        /// Exact phrase to search for.
+        phrase: String,
+    },
+    /// Boolean text search with must/should/must_not.
+    TextBoolean {
+        /// Field containing the text.
+        field: String,
+        /// Terms that must appear.
+        must: Vec<String>,
+        /// Terms that should appear (boost score).
+        should: Vec<String>,
+        /// Terms that must not appear.
+        must_not: Vec<String>,
+    },
 }
 
 impl SimpleFilter {
@@ -453,6 +625,114 @@ impl FilterExpr {
     /// Create an OR filter combining multiple simple expressions.
     pub fn or(exprs: Vec<SimpleFilter>) -> Self {
         FilterExpr::Or(exprs)
+    }
+
+    // === Vector Search Builders ===
+
+    /// Create a vector nearest neighbor search filter.
+    pub fn vector_nearest_neighbor(
+        field: impl Into<String>,
+        query_vector: Vec<f32>,
+        k: u32,
+        max_distance: Option<f32>,
+    ) -> Self {
+        FilterExpr::VectorNearestNeighbor {
+            field: field.into(),
+            query_vector,
+            k,
+            max_distance,
+        }
+    }
+
+    // === Geo Search Builders ===
+
+    /// Create a geo radius search filter.
+    pub fn geo_within_radius(
+        field: impl Into<String>,
+        center_lat: f64,
+        center_lon: f64,
+        radius_km: f64,
+    ) -> Self {
+        FilterExpr::GeoWithinRadius {
+            field: field.into(),
+            center_lat,
+            center_lon,
+            radius_km,
+        }
+    }
+
+    /// Create a geo bounding box search filter.
+    pub fn geo_within_box(
+        field: impl Into<String>,
+        min_lat: f64,
+        min_lon: f64,
+        max_lat: f64,
+        max_lon: f64,
+    ) -> Self {
+        FilterExpr::GeoWithinBox {
+            field: field.into(),
+            min_lat,
+            min_lon,
+            max_lat,
+            max_lon,
+        }
+    }
+
+    /// Create a geo polygon containment search filter.
+    pub fn geo_within_polygon(field: impl Into<String>, vertices: Vec<(f64, f64)>) -> Self {
+        FilterExpr::GeoWithinPolygon {
+            field: field.into(),
+            vertices,
+        }
+    }
+
+    /// Create a geo nearest neighbor search filter.
+    pub fn geo_nearest_neighbor(
+        field: impl Into<String>,
+        center_lat: f64,
+        center_lon: f64,
+        k: u32,
+    ) -> Self {
+        FilterExpr::GeoNearestNeighbor {
+            field: field.into(),
+            center_lat,
+            center_lon,
+            k,
+        }
+    }
+
+    // === Full Text Search Builders ===
+
+    /// Create a full-text match search filter.
+    pub fn text_match(field: impl Into<String>, query: impl Into<String>, min_score: Option<f32>) -> Self {
+        FilterExpr::TextMatch {
+            field: field.into(),
+            query: query.into(),
+            min_score,
+        }
+    }
+
+    /// Create a full-text phrase search filter.
+    pub fn text_phrase(field: impl Into<String>, phrase: impl Into<String>) -> Self {
+        FilterExpr::TextPhrase {
+            field: field.into(),
+            phrase: phrase.into(),
+        }
+    }
+
+    /// Create a boolean text search filter.
+    pub fn text_boolean(
+        field: impl Into<String>,
+        must: Vec<String>,
+        should: Vec<String>,
+        must_not: Vec<String>,
+    ) -> Self {
+        FilterExpr::TextBoolean {
+            field: field.into(),
+            must,
+            should,
+            must_not,
+        }
     }
 }
 
@@ -672,5 +952,155 @@ mod tests {
             rkyv::deserialize::<GraphQuery, rkyv::rancor::Error>(archived).unwrap();
 
         assert_eq!(query, deserialized);
+    }
+
+    #[test]
+    fn test_vector_search_filter() {
+        let filter = FilterExpr::vector_nearest_neighbor(
+            "embedding",
+            vec![0.1, 0.2, 0.3, 0.4],
+            10,
+            Some(0.5),
+        );
+
+        if let FilterExpr::VectorNearestNeighbor {
+            field,
+            query_vector,
+            k,
+            max_distance,
+        } = filter
+        {
+            assert_eq!(field, "embedding");
+            assert_eq!(query_vector.len(), 4);
+            assert_eq!(k, 10);
+            assert_eq!(max_distance, Some(0.5));
+        } else {
+            panic!("Expected VectorNearestNeighbor");
+        }
+    }
+
+    #[test]
+    fn test_geo_search_filters() {
+        // Radius search
+        let filter = FilterExpr::geo_within_radius("location", 37.7749, -122.4194, 10.0);
+        if let FilterExpr::GeoWithinRadius {
+            field,
+            center_lat,
+            center_lon,
+            radius_km,
+        } = filter
+        {
+            assert_eq!(field, "location");
+            assert_eq!(center_lat, 37.7749);
+            assert_eq!(center_lon, -122.4194);
+            assert_eq!(radius_km, 10.0);
+        } else {
+            panic!("Expected GeoWithinRadius");
+        }
+
+        // Bounding box search
+        let filter = FilterExpr::geo_within_box("location", 37.0, -123.0, 38.0, -122.0);
+        if let FilterExpr::GeoWithinBox {
+            min_lat,
+            max_lat,
+            min_lon,
+            max_lon,
+            ..
+        } = filter
+        {
+            assert_eq!(min_lat, 37.0);
+            assert_eq!(max_lat, 38.0);
+            assert_eq!(min_lon, -123.0);
+            assert_eq!(max_lon, -122.0);
+        } else {
+            panic!("Expected GeoWithinBox");
+        }
+
+        // Polygon containment
+        let vertices = vec![
+            (37.0, -122.0),
+            (38.0, -122.0),
+            (38.0, -121.0),
+            (37.0, -121.0),
+        ];
+        let filter = FilterExpr::geo_within_polygon("location", vertices.clone());
+        if let FilterExpr::GeoWithinPolygon { vertices: v, .. } = filter {
+            assert_eq!(v, vertices);
+        } else {
+            panic!("Expected GeoWithinPolygon");
+        }
+
+        // Nearest neighbor
+        let filter = FilterExpr::geo_nearest_neighbor("location", 37.7749, -122.4194, 5);
+        if let FilterExpr::GeoNearestNeighbor { k, .. } = filter {
+            assert_eq!(k, 5);
+        } else {
+            panic!("Expected GeoNearestNeighbor");
+        }
+    }
+
+    #[test]
+    fn test_text_search_filters() {
+        // Text match
+        let filter = FilterExpr::text_match("content", "rust programming", Some(0.5));
+        if let FilterExpr::TextMatch {
+            field,
+            query,
+            min_score,
+        } = filter
+        {
+            assert_eq!(field, "content");
+            assert_eq!(query, "rust programming");
+            assert_eq!(min_score, Some(0.5));
+        } else {
+            panic!("Expected TextMatch");
+        }
+
+        // Phrase search
+        let filter = FilterExpr::text_phrase("content", "memory safety");
+        if let FilterExpr::TextPhrase { field, phrase } = filter {
+            assert_eq!(field, "content");
+            assert_eq!(phrase, "memory safety");
+        } else {
+            panic!("Expected TextPhrase");
+        }
+
+        // Boolean search
+        let filter = FilterExpr::text_boolean(
+            "content",
+            vec!["rust".into()],
+            vec!["programming".into(), "systems".into()],
+            vec!["java".into()],
+        );
+        if let FilterExpr::TextBoolean {
+            must,
+            should,
+            must_not,
+            ..
+        } = filter
+        {
+            assert_eq!(must, vec!["rust"]);
+            assert_eq!(should, vec!["programming", "systems"]);
+            assert_eq!(must_not, vec!["java"]);
+        } else {
+            panic!("Expected TextBoolean");
+        }
+    }
+
+    #[test]
+    fn test_search_filter_serialization() {
+        let filters = vec![
+            FilterExpr::vector_nearest_neighbor("embedding", vec![0.1, 0.2, 0.3], 5, None),
+            FilterExpr::geo_within_radius("location", 40.7128, -74.0060, 25.0),
+            FilterExpr::text_match("body", "hello world", Some(0.3)),
+        ];
+
+        for filter in filters {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&filter).unwrap();
+            let archived = rkyv::access::<ArchivedFilterExpr, rkyv::rancor::Error>(&bytes).unwrap();
+            let deserialized: FilterExpr =
+                rkyv::deserialize::<FilterExpr, rkyv::rancor::Error>(archived).unwrap();
+            assert_eq!(filter, deserialized);
+        }
     }
 }

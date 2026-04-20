@@ -29,7 +29,16 @@ fn extract_filter_fields_inner(filter: &FilterExpr, fields: &mut HashSet<String>
         | FilterExpr::IsNull { field }
         | FilterExpr::IsNotNull { field }
         | FilterExpr::Like { field, .. }
-        | FilterExpr::NotLike { field, .. } => {
+        | FilterExpr::NotLike { field, .. }
+        // Search filter variants
+        | FilterExpr::VectorNearestNeighbor { field, .. }
+        | FilterExpr::GeoWithinRadius { field, .. }
+        | FilterExpr::GeoWithinBox { field, .. }
+        | FilterExpr::GeoWithinPolygon { field, .. }
+        | FilterExpr::GeoNearestNeighbor { field, .. }
+        | FilterExpr::TextMatch { field, .. }
+        | FilterExpr::TextPhrase { field, .. }
+        | FilterExpr::TextBoolean { field, .. } => {
             fields.insert(field.clone());
         }
         FilterExpr::And(simple_filters) | FilterExpr::Or(simple_filters) => {
@@ -53,7 +62,16 @@ fn extract_simple_filter_fields(filter: &SimpleFilter, fields: &mut HashSet<Stri
         | SimpleFilter::IsNull { field }
         | SimpleFilter::IsNotNull { field }
         | SimpleFilter::Like { field, .. }
-        | SimpleFilter::NotLike { field, .. } => {
+        | SimpleFilter::NotLike { field, .. }
+        // Search filter variants
+        | SimpleFilter::VectorNearestNeighbor { field, .. }
+        | SimpleFilter::GeoWithinRadius { field, .. }
+        | SimpleFilter::GeoWithinBox { field, .. }
+        | SimpleFilter::GeoWithinPolygon { field, .. }
+        | SimpleFilter::GeoNearestNeighbor { field, .. }
+        | SimpleFilter::TextMatch { field, .. }
+        | SimpleFilter::TextPhrase { field, .. }
+        | SimpleFilter::TextBoolean { field, .. } => {
             fields.insert(field.clone());
         }
     }
@@ -177,6 +195,35 @@ impl FilterEvaluator {
                 }
                 Ok(false)
             }
+            // Search filters require index-based evaluation
+            // These are handled by the query executor, not in-memory filtering
+            FilterExpr::VectorNearestNeighbor { .. } => {
+                Err(Error::InvalidData(
+                    "VectorNearestNeighbor requires index-based evaluation".into(),
+                ))
+            }
+            FilterExpr::GeoWithinRadius { field, center_lat, center_lon, radius_km } => {
+                // Geo radius can be evaluated in-memory using haversine distance
+                Self::evaluate_geo_within_radius(row, field, *center_lat, *center_lon, *radius_km)
+            }
+            FilterExpr::GeoWithinBox { field, min_lat, min_lon, max_lat, max_lon } => {
+                // Geo box can be evaluated in-memory
+                Self::evaluate_geo_within_box(row, field, *min_lat, *min_lon, *max_lat, *max_lon)
+            }
+            FilterExpr::GeoWithinPolygon { field, vertices } => {
+                // Geo polygon can be evaluated in-memory using ray casting
+                Self::evaluate_geo_within_polygon(row, field, vertices)
+            }
+            FilterExpr::GeoNearestNeighbor { .. } => {
+                Err(Error::InvalidData(
+                    "GeoNearestNeighbor requires index-based evaluation".into(),
+                ))
+            }
+            FilterExpr::TextMatch { .. } | FilterExpr::TextPhrase { .. } | FilterExpr::TextBoolean { .. } => {
+                Err(Error::InvalidData(
+                    "Full-text search requires index-based evaluation".into(),
+                ))
+            }
         }
     }
 
@@ -245,6 +292,31 @@ impl FilterEvaluator {
                     _ => Ok(true),
                 }
             }
+            // Search filters in SimpleFilter context
+            SimpleFilter::VectorNearestNeighbor { .. } => {
+                Err(Error::InvalidData(
+                    "VectorNearestNeighbor requires index-based evaluation".into(),
+                ))
+            }
+            SimpleFilter::GeoWithinRadius { field, center_lat, center_lon, radius_km } => {
+                Self::evaluate_geo_within_radius(row, field, *center_lat, *center_lon, *radius_km)
+            }
+            SimpleFilter::GeoWithinBox { field, min_lat, min_lon, max_lat, max_lon } => {
+                Self::evaluate_geo_within_box(row, field, *min_lat, *min_lon, *max_lat, *max_lon)
+            }
+            SimpleFilter::GeoWithinPolygon { field, vertices } => {
+                Self::evaluate_geo_within_polygon(row, field, vertices)
+            }
+            SimpleFilter::GeoNearestNeighbor { .. } => {
+                Err(Error::InvalidData(
+                    "GeoNearestNeighbor requires index-based evaluation".into(),
+                ))
+            }
+            SimpleFilter::TextMatch { .. } | SimpleFilter::TextPhrase { .. } | SimpleFilter::TextBoolean { .. } => {
+                Err(Error::InvalidData(
+                    "Full-text search requires index-based evaluation".into(),
+                ))
+            }
         }
     }
 
@@ -271,6 +343,98 @@ impl FilterEvaluator {
             Some(fv) => Ok(comparator(fv, value)),
             None => Ok(false), // Missing field doesn't match
         }
+    }
+
+    // === Geo evaluation helpers ===
+
+    /// Evaluate geo within radius filter using haversine distance.
+    fn evaluate_geo_within_radius(
+        row: &EntityRow,
+        field: &str,
+        center_lat: f64,
+        center_lon: f64,
+        radius_km: f64,
+    ) -> Result<bool, Error> {
+        let field_value = Self::get_field_value(row, field);
+        match field_value {
+            Some(Value::GeoPoint { lat, lon }) => {
+                let distance = Self::haversine_distance(center_lat, center_lon, *lat, *lon);
+                Ok(distance <= radius_km)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Evaluate geo within bounding box filter.
+    fn evaluate_geo_within_box(
+        row: &EntityRow,
+        field: &str,
+        min_lat: f64,
+        min_lon: f64,
+        max_lat: f64,
+        max_lon: f64,
+    ) -> Result<bool, Error> {
+        let field_value = Self::get_field_value(row, field);
+        match field_value {
+            Some(Value::GeoPoint { lat, lon }) => {
+                Ok(*lat >= min_lat && *lat <= max_lat && *lon >= min_lon && *lon <= max_lon)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Evaluate geo within polygon filter using ray casting algorithm.
+    fn evaluate_geo_within_polygon(
+        row: &EntityRow,
+        field: &str,
+        vertices: &[(f64, f64)],
+    ) -> Result<bool, Error> {
+        let field_value = Self::get_field_value(row, field);
+        match field_value {
+            Some(Value::GeoPoint { lat, lon }) => {
+                Ok(Self::point_in_polygon(*lat, *lon, vertices))
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Calculate haversine distance between two points in kilometers.
+    fn haversine_distance(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+        const EARTH_RADIUS_KM: f64 = 6371.0;
+
+        let lat1_rad = lat1.to_radians();
+        let lat2_rad = lat2.to_radians();
+        let delta_lat = (lat2 - lat1).to_radians();
+        let delta_lon = (lon2 - lon1).to_radians();
+
+        let a = (delta_lat / 2.0).sin().powi(2)
+            + lat1_rad.cos() * lat2_rad.cos() * (delta_lon / 2.0).sin().powi(2);
+        let c = 2.0 * a.sqrt().asin();
+
+        EARTH_RADIUS_KM * c
+    }
+
+    /// Check if a point is inside a polygon using ray casting algorithm.
+    fn point_in_polygon(lat: f64, lon: f64, vertices: &[(f64, f64)]) -> bool {
+        if vertices.len() < 3 {
+            return false;
+        }
+
+        let mut inside = false;
+        let n = vertices.len();
+
+        let mut j = n - 1;
+        for i in 0..n {
+            let (yi, xi) = vertices[i];
+            let (yj, xj) = vertices[j];
+
+            if ((yi > lat) != (yj > lat)) && (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) {
+                inside = !inside;
+            }
+            j = i;
+        }
+
+        inside
     }
 
     /// Check if two values are equal.

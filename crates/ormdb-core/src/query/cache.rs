@@ -102,6 +102,22 @@ impl QueryFingerprint {
                     Self::hash_simple_filter_structure(f, hasher);
                 }
             }
+            // Search filter variants - hash field and key parameters
+            FilterExpr::VectorNearestNeighbor { field, k, .. } => {
+                field.hash(hasher);
+                k.hash(hasher);
+            }
+            FilterExpr::GeoWithinRadius { field, .. }
+            | FilterExpr::GeoWithinBox { field, .. }
+            | FilterExpr::GeoWithinPolygon { field, .. }
+            | FilterExpr::GeoNearestNeighbor { field, .. } => {
+                field.hash(hasher);
+            }
+            FilterExpr::TextMatch { field, .. }
+            | FilterExpr::TextPhrase { field, .. }
+            | FilterExpr::TextBoolean { field, .. } => {
+                field.hash(hasher);
+            }
         }
     }
 
@@ -126,6 +142,22 @@ impl QueryFingerprint {
             | SimpleFilter::NotIn { field, values } => {
                 field.hash(hasher);
                 values.len().hash(hasher);
+            }
+            // Search filter variants - hash field and key parameters
+            SimpleFilter::VectorNearestNeighbor { field, k, .. } => {
+                field.hash(hasher);
+                k.hash(hasher);
+            }
+            SimpleFilter::GeoWithinRadius { field, .. }
+            | SimpleFilter::GeoWithinBox { field, .. }
+            | SimpleFilter::GeoWithinPolygon { field, .. }
+            | SimpleFilter::GeoNearestNeighbor { field, .. } => {
+                field.hash(hasher);
+            }
+            SimpleFilter::TextMatch { field, .. }
+            | SimpleFilter::TextPhrase { field, .. }
+            | SimpleFilter::TextBoolean { field, .. } => {
+                field.hash(hasher);
             }
         }
     }

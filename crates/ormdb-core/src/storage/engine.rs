@@ -1,6 +1,9 @@
 //! Storage engine implementation.
 
-use super::{BTreeIndex, Changelog, ColumnarStore, HashIndex, Record, StorageConfig, VersionedKey};
+use super::{
+    BTreeIndex, Changelog, ColumnarStore, FullTextConfig, FullTextIndex, GeoIndex, GeoPoint,
+    HashIndex, HnswConfig, Record, RTreeConfig, StorageConfig, VectorIndex, VersionedKey,
+};
 use crate::error::Error;
 use crate::query::decode_entity;
 use sled::{Db, Tree};
@@ -45,6 +48,15 @@ pub struct StorageEngine {
 
     /// Tracks which columns have had their B-tree index built this process.
     btree_indexed_columns: RwLock<HashSet<(String, String)>>,
+
+    /// Vector index for approximate nearest neighbor search (HNSW).
+    vector_index: Option<VectorIndex>,
+
+    /// Geo index for spatial queries (R-tree).
+    geo_index: Option<GeoIndex>,
+
+    /// Full-text index for text search (inverted index with BM25).
+    fulltext_index: Option<FullTextIndex>,
 }
 
 impl StorageEngine {
@@ -73,6 +85,33 @@ impl StorageEngine {
             None
         };
 
+        // Initialize vector index
+        let vector_index = match VectorIndex::open(&db, HnswConfig::default()) {
+            Ok(vi) => Some(vi),
+            Err(e) => {
+                tracing::warn!("Failed to open vector index: {:?}", e);
+                None
+            }
+        };
+
+        // Initialize geo index
+        let geo_index = match GeoIndex::open(&db, RTreeConfig::default()) {
+            Ok(gi) => Some(gi),
+            Err(e) => {
+                tracing::warn!("Failed to open geo index: {:?}", e);
+                None
+            }
+        };
+
+        // Initialize full-text index
+        let fulltext_index = match FullTextIndex::open(&db, FullTextConfig::default()) {
+            Ok(fti) => Some(fti),
+            Err(e) => {
+                tracing::warn!("Failed to open full-text index: {:?}", e);
+                None
+            }
+        };
+
         Ok(Self {
             db,
             data_tree,
@@ -82,6 +121,9 @@ impl StorageEngine {
             hash_index,
             btree_index,
             btree_indexed_columns: RwLock::new(HashSet::new()),
+            vector_index,
+            geo_index,
+            fulltext_index,
         })
     }
 
@@ -503,6 +545,132 @@ impl StorageEngine {
     /// Get the B-tree index for O(log N) range lookups, if available.
     pub fn btree_index(&self) -> Option<&BTreeIndex> {
         self.btree_index.as_ref()
+    }
+
+    /// Get the vector index for approximate nearest neighbor search, if available.
+    pub fn vector_index(&self) -> Option<&VectorIndex> {
+        self.vector_index.as_ref()
+    }
+
+    /// Get the geo index for spatial queries, if available.
+    pub fn geo_index(&self) -> Option<&GeoIndex> {
+        self.geo_index.as_ref()
+    }
+
+    /// Get the full-text index for text search, if available.
+    pub fn fulltext_index(&self) -> Option<&FullTextIndex> {
+        self.fulltext_index.as_ref()
+    }
+
+    /// Check if a vector index exists for an entity/column.
+    pub fn has_vector_index(&self, entity_type: &str, column_name: &str) -> bool {
+        self.vector_index
+            .as_ref()
+            .and_then(|vi| vi.has_index(entity_type, column_name).ok())
+            .unwrap_or(false)
+    }
+
+    /// Check if a geo index exists for an entity/column.
+    pub fn has_geo_index(&self, entity_type: &str, column_name: &str) -> bool {
+        self.geo_index
+            .as_ref()
+            .and_then(|gi| gi.has_index(entity_type, column_name).ok())
+            .unwrap_or(false)
+    }
+
+    /// Check if a full-text index exists for an entity/column.
+    pub fn has_fulltext_index(&self, entity_type: &str, column_name: &str) -> bool {
+        self.fulltext_index
+            .as_ref()
+            .and_then(|fti| fti.has_index(entity_type, column_name).ok())
+            .unwrap_or(false)
+    }
+
+    /// Insert a vector into the vector index.
+    pub fn insert_vector(
+        &self,
+        entity_type: &str,
+        column_name: &str,
+        entity_id: [u8; 16],
+        vector: &[f32],
+    ) -> Result<(), Error> {
+        if let Some(vi) = &self.vector_index {
+            vi.insert(entity_type, column_name, entity_id, vector)?;
+        }
+        Ok(())
+    }
+
+    /// Search for nearest neighbors in the vector index.
+    pub fn search_vector(
+        &self,
+        entity_type: &str,
+        column_name: &str,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<([u8; 16], f32)>, Error> {
+        if let Some(vi) = &self.vector_index {
+            vi.search(entity_type, column_name, query, k)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Insert a geo point into the geo index.
+    pub fn insert_geo_point(
+        &self,
+        entity_type: &str,
+        column_name: &str,
+        entity_id: [u8; 16],
+        point: GeoPoint,
+    ) -> Result<(), Error> {
+        if let Some(gi) = &self.geo_index {
+            gi.insert(entity_type, column_name, entity_id, point)?;
+        }
+        Ok(())
+    }
+
+    /// Search for entities within a radius of a center point.
+    pub fn search_geo_radius(
+        &self,
+        entity_type: &str,
+        column_name: &str,
+        center: GeoPoint,
+        radius_km: f64,
+    ) -> Result<Vec<([u8; 16], f64)>, Error> {
+        if let Some(gi) = &self.geo_index {
+            gi.within_radius(entity_type, column_name, center, radius_km)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Insert text into the full-text index.
+    pub fn insert_fulltext(
+        &self,
+        entity_type: &str,
+        column_name: &str,
+        entity_id: [u8; 16],
+        text: &str,
+    ) -> Result<(), Error> {
+        if let Some(fti) = &self.fulltext_index {
+            fti.insert(entity_type, column_name, entity_id, text)?;
+        }
+        Ok(())
+    }
+
+    /// Search the full-text index.
+    pub fn search_fulltext(
+        &self,
+        entity_type: &str,
+        column_name: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<super::SearchResult>, Error> {
+        if let Some(fti) = &self.fulltext_index {
+            fti.search(entity_type, column_name, query, limit)
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     /// Lookup entity IDs by field value, merging hash index results with changelog pending entries.

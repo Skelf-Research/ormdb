@@ -148,6 +148,133 @@ while True:
     offset += 100
 ```
 
+### Search Methods
+
+The client provides specialized methods for vector, geographic, and full-text search.
+
+#### Vector Search
+
+Find similar items using HNSW k-nearest neighbor search:
+
+```python
+# Find 10 most similar products
+similar = client.vector_search(
+    "Product",
+    "embedding",
+    query_vector=[0.1, 0.2, 0.3, ...],
+    k=10,
+    max_distance=0.5,  # optional threshold
+)
+
+for product in similar.entities:
+    print(f"Similar: {product['name']}")
+```
+
+#### Geographic Search
+
+Find entities by location:
+
+```python
+# Radius search
+nearby = client.geo_search(
+    "Restaurant",
+    "location",
+    center_lat=37.7749,
+    center_lon=-122.4194,
+    radius_km=5.0,
+)
+
+# Bounding box search
+in_box = client.geo_box_search(
+    "Restaurant",
+    "location",
+    min_lat=37.7, min_lon=-122.5,
+    max_lat=37.85, max_lon=-122.35,
+)
+
+# Polygon search
+in_area = client.geo_polygon_search(
+    "Restaurant",
+    "location",
+    vertices=[
+        (37.7, -122.5),
+        (37.8, -122.5),
+        (37.85, -122.4),
+    ],
+)
+
+# k-nearest
+closest = client.geo_nearest(
+    "Restaurant",
+    "location",
+    center_lat=37.7749,
+    center_lon=-122.4194,
+    k=10,
+)
+```
+
+#### Full-Text Search
+
+Search text content with BM25 ranking:
+
+```python
+# Basic text search
+articles = client.text_search(
+    "Article",
+    "content",
+    "rust programming",
+    min_score=0.5,
+)
+
+# Phrase search
+exact = client.text_phrase_search(
+    "Article",
+    "content",
+    "quick brown fox",
+)
+
+# Boolean search
+advanced = client.text_boolean_search(
+    "Article",
+    "content",
+    must=["rust"],
+    should=["performance", "safety"],
+    must_not=["deprecated"],
+)
+```
+
+#### Using SearchFilter Types
+
+```python
+from ormdb.types import VectorSearchFilter, GeoRadiusFilter, TextMatchFilter
+
+# Create typed filters
+vector_filter = VectorSearchFilter(
+    field="embedding",
+    query_vector=[0.1, 0.2, 0.3],
+    k=10,
+    max_distance=0.5,
+)
+
+geo_filter = GeoRadiusFilter(
+    field="location",
+    center_lat=37.7749,
+    center_lon=-122.4194,
+    radius_km=5.0,
+)
+
+text_filter = TextMatchFilter(
+    field="content",
+    query="rust programming",
+    min_score=0.5,
+)
+
+# Use with search method
+results = client.search("Product", vector_filter)
+```
+
+For more details, see the **[Search Guide](../guides/search.md)**.
+
 ## SQLAlchemy Integration
 
 ```python

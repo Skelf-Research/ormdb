@@ -315,6 +315,18 @@ interface OrmdbConfig {
 - `getReplicationStatus()` - Get replication status
 - `streamChanges(options)` - Stream CDC changes
 
+#### Search Methods
+
+- `vectorSearch(entity, field, queryVector, k, options?)` - Vector similarity search
+- `geoSearch(entity, field, lat, lon, radiusKm, options?)` - Geographic radius search
+- `geoBoxSearch(entity, field, minLat, minLon, maxLat, maxLon, options?)` - Bounding box search
+- `geoPolygonSearch(entity, field, vertices, options?)` - Polygon containment search
+- `geoNearest(entity, field, lat, lon, k, options?)` - k-nearest geographic search
+- `textSearch(entity, field, query, options?)` - Full-text BM25 search
+- `textPhraseSearch(entity, field, phrase, options?)` - Exact phrase search
+- `textBooleanSearch(entity, field, terms, options?)` - Boolean text search
+- `search(entity, filter, options?)` - Generic search with SearchFilter
+
 ### Filter Operators
 
 ```typescript
@@ -342,6 +354,30 @@ interface OrmdbConfig {
 { and: [filter1, filter2] }
 { or: [filter1, filter2] }
 { not: filter }
+```
+
+### Search Filters
+
+```typescript
+// Vector similarity search
+const similar = await client.vectorSearch("Product", "embedding", queryVector, 10, {
+  maxDistance: 0.5,
+});
+
+// Geographic radius search
+const nearby = await client.geoSearch("Restaurant", "location", 37.7749, -122.4194, 5.0);
+
+// Full-text search
+const articles = await client.textSearch("Article", "content", "rust programming", {
+  minScore: 0.5,
+});
+
+// Boolean text search
+const results = await client.textBooleanSearch("Article", "content", {
+  must: ["rust"],
+  should: ["performance"],
+  mustNot: ["deprecated"],
+});
 ```
 
 ## Error Handling

@@ -40,6 +40,9 @@ const user = await db.fetch({
 - **Safe Migrations** - Online schema changes with automatic safety grading
 - **Change Streams** - Built-in CDC for cache invalidation and real-time updates
 - **ORM Adapters** - Drop-in support for Prisma, Drizzle, TypeORM, SQLAlchemy, and more
+- **Vector Search** - HNSW-indexed k-nearest neighbor search for embeddings
+- **Geo Search** - R-tree indexed geographic queries (radius, bounding box, polygon)
+- **Full-Text Search** - BM25 ranked text search with phrase and boolean support
 
 ## Quick Start
 

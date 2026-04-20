@@ -344,12 +344,131 @@ Filter included relations:
     });
     ```
 
+## Advanced Search Filters
+
+Beyond comparison operators, ORMDB supports specialized search filters for vector similarity, geographic, and full-text search.
+
+### Vector Similarity Search
+
+Find similar items using HNSW k-nearest neighbor search:
+
+=== "Rust"
+
+    ```rust
+    let filter = FilterExpr::vector_nearest_neighbor(
+        "embedding",
+        query_vector,
+        10,  // k nearest neighbors
+    );
+
+    let query = GraphQuery::new("Product").with_filter(filter);
+    ```
+
+=== "TypeScript"
+
+    ```typescript
+    const similar = await client.vectorSearch(
+      "Product",
+      "embedding",
+      [0.1, 0.2, 0.3, ...],  // query vector
+      10,                     // k nearest neighbors
+      { maxDistance: 0.5 }    // optional threshold
+    );
+    ```
+
+=== "Python"
+
+    ```python
+    similar = client.vector_search(
+        "Product",
+        "embedding",
+        query_vector=[0.1, 0.2, 0.3, ...],
+        k=10,
+        max_distance=0.5,
+    )
+    ```
+
+### Geographic Search
+
+Find entities within a geographic radius:
+
+=== "Rust"
+
+    ```rust
+    let filter = FilterExpr::geo_within_radius(
+        "location",
+        37.7749,   // latitude
+        -122.4194, // longitude
+        5.0,       // radius in km
+    );
+    ```
+
+=== "TypeScript"
+
+    ```typescript
+    const nearby = await client.geoSearch(
+      "Restaurant",
+      "location",
+      37.7749,   // latitude
+      -122.4194, // longitude
+      5.0        // radius in km
+    );
+    ```
+
+=== "Python"
+
+    ```python
+    nearby = client.geo_search(
+        "Restaurant",
+        "location",
+        center_lat=37.7749,
+        center_lon=-122.4194,
+        radius_km=5.0,
+    )
+    ```
+
+### Full-Text Search
+
+Search text content with BM25 ranking:
+
+=== "Rust"
+
+    ```rust
+    let filter = FilterExpr::text_match("content", "rust programming");
+    let query = GraphQuery::new("Article").with_filter(filter);
+    ```
+
+=== "TypeScript"
+
+    ```typescript
+    const results = await client.textSearch(
+      "Article",
+      "content",
+      "rust programming",
+      { minScore: 0.5 }
+    );
+    ```
+
+=== "Python"
+
+    ```python
+    results = client.text_search(
+        "Article",
+        "content",
+        "rust programming",
+        min_score=0.5,
+    )
+    ```
+
+For comprehensive search documentation, see the **[Search Guide](../guides/search.md)**.
+
 ## Best Practices
 
 1. **Use indexes** - Filter on indexed fields for best performance
 2. **Prefer IN over OR** - `status IN [a, b]` is faster than `status = a OR status = b`
 3. **Filter early** - Apply filters to reduce data before includes
 4. **Avoid LIKE with leading wildcard** - `LIKE '%text'` can't use indexes
+5. **Use appropriate search types** - Vector for embeddings, geo for locations, text for content
 
 ## Next Steps
 
